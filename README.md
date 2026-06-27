@@ -4,6 +4,10 @@ A small **SDL3 + legacy fixed-function OpenGL/GLU** demo in C. It opens a window
 loads Wavefront `.obj` models, and renders a rotating, lit scene. Originally an
 SDL1 OpenGL tutorial (Michael Vance, 2000), ported SDL1 → SDL2 → **SDL3**.
 
+A companion **modern renderer** — `sdl3-glsl`, core-profile **OpenGL 3.3 + GLSL**
+with shaders, VAOs/VBOs, textures and shadow mapping — is built alongside it.
+See [Modern renderer (`sdl3-glsl`)](#modern-renderer-sdl3-glsl).
+
 ## Features
 
 - Window + OpenGL context creation via SDL3
@@ -14,13 +18,20 @@ SDL1 OpenGL tutorial (Michael Vance, 2000), ported SDL1 → SDL2 → **SDL3**.
 - Optional **VBO** (vertex-buffer-object) rendering path with automatic
   fall-back to immediate mode (see [Rendering paths](#rendering-paths))
 - Working-directory-independent asset loading (see [Assets](#assets))
+- A separate **modern OpenGL 3.3 + GLSL** renderer (`sdl3-glsl`) with GLAD,
+  shader lighting, key-light shadow mapping, per-material textures and
+  transparency, model cycling, and mouse/touch orbit — see
+  [Modern renderer (`sdl3-glsl`)](#modern-renderer-sdl3-glsl)
 
 ## Requirements
 
 - A C11 compiler (tested with gcc 14)
 - [CMake](https://cmake.org/) ≥ 3.16
 - **SDL3** (tested with 3.2.10)
-- OpenGL and GLU development libraries
+- OpenGL and GLU development libraries (GLU is used only by the legacy target)
+
+The modern renderer needs no extra packages: its GL loader (**GLAD**) and image
+decoder (**stb_image**) are vendored in the repo (`glad/`, `third_party/`).
 
 On Debian/Ubuntu:
 
@@ -33,11 +44,12 @@ sudo apt install build-essential cmake libsdl3-dev libgl1-mesa-dev libglu1-mesa-
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/sdl3-gl
+./build/sdl3-gl        # legacy fixed-function renderer
+./build/sdl3-glsl      # modern core-profile 3.3 + GLSL renderer
 ```
 
-The binary can be launched from any directory — it locates the `assets/` folder
-on its own (see below).
+Both executables build by default and run independently. Either can be launched
+from any directory — they locate the `assets/` folder on their own (see below).
 
 ## Controls
 
@@ -71,6 +83,59 @@ mode; otherwise it defaults to the VBO path. Press `B` to switch between the
 two at runtime. See `load_gl_vbo_functions()`, `upload_model_vbo()` and
 `draw_model_vbo()` in [sdl3-gl.c](sdl3-gl.c).
 
+## Modern renderer (`sdl3-glsl`)
+
+Alongside the legacy app the project builds a second executable, **`sdl3-glsl`**,
+a **core-profile OpenGL 3.3 + GLSL** renderer. A core context exposes no
+`glBegin`, matrix stack, or `glLight*`, so geometry lives in VAOs/VBOs,
+transforms come from [mat4.h](mat4.h), and all lighting is done in shaders. GL
+entry points are loaded with **GLAD** (generated under [glad/](glad/)); no GLU.
+
+### What it does
+
+- Loads OBJ/MTL/texture **bundles** via [obj_loader.h](obj_loader.h) — the
+  modern counterpart to `parse.h` — into one interleaved, GPU-ready vertex array
+  with per-material **submeshes**.
+- Shades with **Blinn-Phong**: a single directional key light plus a flat
+  ambient fill, with **key-light shadow mapping** (a depth pass from the light's
+  view, sampled with 3×3 PCF) for self-shadowing.
+- Applies per-material **textures** (`map_Kd`, decoded by the vendored
+  [stb_image](third_party/stb_image.h)) and **transparency** (`d`); glass is
+  lifted by Fresnel + specular so it reads as glass rather than near-invisible.
+- Frames each model automatically from its bounding sphere; **mouse and touch**
+  orbit/zoom.
+
+### Controls
+
+| Input | Action |
+| ----- | ------ |
+| Left-drag / one-finger drag | Orbit the camera |
+| Mouse wheel / two-finger pinch | Zoom |
+| `Enter` | Cycle model (car → table → head → cube) |
+| `Space` | Toggle auto-rotation |
+| `↑` / `↓` | Brighten / darken ambient fill |
+| `O` | Cycle orientation presets (corrects Z-up exports) |
+| `W` | Toggle wireframe |
+| `C` | Toggle back-face culling (off by default — assets have mixed winding) |
+| `Esc` | Quit |
+
+### Asset bundles (OBJ + MTL + image)
+
+A textured model is a self-describing folder of files — the native Wavefront
+convention, no custom format needed:
+
+- `model.obj` — geometry, with `mtllib model.mtl` and `usemtl <name>` per face
+  group;
+- `model.mtl` — one `newmtl` block per material (`Kd`/`Ka`/`Ks`/`Ns`/`d`) and an
+  optional `map_Kd <image>` diffuse texture;
+- the image file(s) referenced by `map_Kd`.
+
+`obj_loader.h` reads the `.mtl`, groups triangles into per-material submeshes,
+and resolves each `map_Kd` path relative to the `.mtl`; the renderer decodes the
+image and binds it per submesh. The bundled **Oriental Table** exercises this
+end-to-end (four textured materials); the **Victory Car** shows multi-material
+colour with translucent glass.
+
 ## Assets
 
 Models live in [assets/](assets/) (`head.obj`, `cube.obj`). At startup the
@@ -97,10 +162,15 @@ Debugging requires the
 
 | Path             | Purpose                                            |
 | ---------------- | -------------------------------------------------- |
-| `sdl3-gl.c`      | Main program: window, input, OpenGL rendering      |
+| `sdl3-gl.c`      | Legacy program: window, input, fixed-function OpenGL |
 | `parse.h`        | Self-contained Wavefront `.obj` parser/loader      |
-| `assets/`        | `.obj` models                                      |
-| `CMakeLists.txt` | Build configuration (SDL3 + OpenGL + GLU)          |
+| `sdl3-glsl.c`    | Modern core-profile 3.3 + GLSL renderer            |
+| `obj_loader.h`   | Modern OBJ/MTL/texture loader (per-material submeshes) |
+| `mat4.h`         | Column-major matrix/vector math for the modern path |
+| `glad/`          | Generated GLAD OpenGL 3.3 core loader               |
+| `third_party/`   | Vendored `stb_image.h` (image decoding)            |
+| `assets/`        | `.obj` models, `.mtl` materials, and textures      |
+| `CMakeLists.txt` | Build configuration (both targets)                 |
 | `.vscode/`       | Editor build tasks and debug launch config         |
 
 ## SDL2 → SDL3 migration notes
