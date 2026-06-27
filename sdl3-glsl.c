@@ -490,6 +490,21 @@ int main(int argc, char* argv[])
     }
     int mi = 0;   /* current model index (ENTER cycles) */
 
+    /* Axis gizmo: the X/Y/Z glyph model is loaded once and drawn every frame
+       into a small corner viewport (not part of the ENTER cycle). It shares
+       the main shader; having no materials it shades in the default grey. */
+    gpu_model gizmo;
+    float gcenter[3];
+    float gradius;
+    memset(&gizmo, 0, sizeof gizmo);
+    if (!obj_load(asset_path("assets/axes.obj"), &gizmo.mesh)) {
+        fprintf(stderr, "failed to load axis gizmo assets/axes.obj\n");
+        return 1;
+    }
+    gpu_model_upload(&gizmo);
+    gpu_model_load_textures(&gizmo);
+    model_bounds(&gizmo.mesh, gcenter, &gradius);
+
     /* Directional key light direction; must match the shader's key. The
        light-space matrix that frames each model is rebuilt per frame below. */
     float keyDir[3] = { 0.6f, 0.8f, 0.5f };
@@ -738,11 +753,61 @@ int main(int argc, char* argv[])
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
 
+        /* ---- axis gizmo: small bottom-left overlay showing X/Y/Z ----
+           A scissored square in the corner gets its own depth clear so the
+           gizmo draws over the scene. It uses the SAME yaw/pitch as the camera
+           (so it tracks the view) but a fixed framing distance, so it stays the
+           same size in the corner regardless of how far the scene is zoomed. */
+        {
+            int gs = (pw < ph ? pw : ph) / 5;
+            if (gs < 96)  gs = 96;
+            if (gs > 220) gs = 220;
+            const int margin = 12;          /* viewport origin is bottom-left */
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(margin, margin, gs, gs);
+            glClear(GL_DEPTH_BUFFER_BIT);   /* fresh depth, only in the corner */
+            glViewport(margin, margin, gs, gs);
+
+            float gdist = gradius / sinf(fovy * 0.5f) * 1.25f;
+            float geye[3] = {
+                gcenter[0] + gdist * cosf(pitch) * sinf(yaw),
+                gcenter[1] + gdist * sinf(pitch),
+                gcenter[2] + gdist * cosf(pitch) * cosf(yaw)
+            };
+            float gnear = gdist - gradius * 1.5f; if (gnear < 0.01f) gnear = 0.01f;
+            mat4 gproj  = mat4_perspective(fovy, 1.0f, gnear, gdist + gradius * 3.0f);
+            mat4 gview  = mat4_look_at(geye, gcenter, up);
+            /* same turntable spin + Z-up -> Y-up correction the scene model
+               uses, about the gizmo centre, so the labels track the model's
+               current pose. */
+            mat4 gmodel = mat4_mul(mat4_translate(gcenter[0], gcenter[1], gcenter[2]),
+                          mat4_mul(spinM,
+                          mat4_mul(orientation_matrix(orient_index),
+                                   mat4_translate(-gcenter[0], -gcenter[1], -gcenter[2]))));
+            mat4 gmvp   = mat4_mul(gproj, mat4_mul(gview, gmodel));
+            float gnormal[9];
+            mat3_normal_from_mat4(gmodel, gnormal);
+
+            glUseProgram(prog);
+            glUniformMatrix4fv(u.mvp,       1, GL_FALSE, gmvp.m);
+            glUniformMatrix4fv(u.model,     1, GL_FALSE, gmodel.m);
+            glUniformMatrix3fv(u.normalMat, 1, GL_FALSE, gnormal);
+            glUniform3fv(u.viewPos, 1, geye);
+            glUniform3f(u.ambient, 0.55f, 0.55f, 0.55f);  /* brighter so it reads */
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            glDisable(GL_CULL_FACE);        /* thin glyphs: show both sides */
+            glBindVertexArray(gizmo.vao);
+            for (size_t i = 0; i < gizmo.mesh.submesh_count; i++)
+                draw_submesh(&gizmo, &u, i);
+            glDisable(GL_SCISSOR_TEST);
+        }
+
         SDL_GL_SwapWindow(window);
         SDL_Delay(16);
     }
 
     for (int i = 0; i < NUM_MODELS; i++) { free(models[i].material_tex); obj_free(&models[i].mesh); }
+    free(gizmo.material_tex); obj_free(&gizmo.mesh);
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();
