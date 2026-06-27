@@ -1,0 +1,152 @@
+# 
+# Wavefront material file
+# Converted by the DEEP Exploration  Deep Exploration 6.3 x64 6.3.3.8069
+# Right Hemisphere, LTD
+# http://www.righthemisphere.com/
+# 
+
+newmtl Chrome
+Ka 0.72549 0.72549 0.72549
+Kd 0.72549 0.72549 0.72549
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Metal
+Ka 0.360784 0.360784 0.360784
+Kd 0.360784 0.360784 0.360784
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 512
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Wheels
+Ka 0.360784 0.360784 0.360784
+Kd 0.180392 0.180392 0.180392
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 512
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Leather
+Ka 1 0.501961 0.501961
+Kd 0.501961 0 0
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 32
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Carpaint_01
+Ka 0.639216 0.415686 0.639216
+Kd 0.741176 0.47451 0.741176
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Carpaint_02
+Ka 0.890196 0.741176 0.462745
+Kd 0.941177 0.878431 0.760784
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Glass
+Ka 0.996078 1 0.94902
+Kd 0.890196 0.984314 1
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+d 0.06
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Glass_Orange
+Ka 1 0.501961 1
+Kd 1 0.45098 0
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+d 0.8
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
+
+newmtl Lamp_Emissive
+Ka 1 1 1
+Kd 1 1 0
+Ks 0.905882 0.905882 0.905882
+illum 2
+Ns 2048
+map_Kd 
+map_bump 
+bump 
+map_opacity 
+map_d 
+refl 
+map_kS 
+map_kA 
+map_Ns 
