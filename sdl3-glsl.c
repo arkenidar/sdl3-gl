@@ -500,6 +500,9 @@ int main(int argc, char* argv[])
     const float fovy = 30.0f * (float)M_PI / 180.0f;
     float distance = mradius[mi] / sinf(fovy * 0.5f) * 1.2f;
     float yaw = 0.0f, pitch = 0.35f;
+    float spin = 0.0f;                 /* turntable angle: the MODEL rotates
+                                          under the fixed light (so shadows sweep
+                                          across the surface), not the camera */
     int   orient_index = 1;            /* default Z-up -> Y-up correction */
 
     glEnable(GL_DEPTH_TEST);
@@ -640,17 +643,24 @@ int main(int argc, char* argv[])
         if (distance < DIST_MIN) distance = DIST_MIN;
         if (distance > DIST_MAX) distance = DIST_MAX;
 
-        /* auto-rotate the view, but not while the user is actively dragging */
+        /* auto-spin the MODEL (turntable about vertical), but not while the user
+           is actively dragging the camera. Spinning the geometry under the fixed
+           light - rather than orbiting the camera around a static model - is what
+           makes the shading and self-shadows sweep across the surface. */
         if (rotate && !dragging && nfingers == 0) {
-            yaw += 0.01f;
-            if (yaw > 2.0f*(float)M_PI) yaw -= 2.0f*(float)M_PI;
+            spin += 0.01f;
+            if (spin > 2.0f*(float)M_PI) spin -= 2.0f*(float)M_PI;
         }
 
-        /* model = orientation correction, applied about the model centre;
-           independent of the camera and shared by both passes. */
+        /* model = turntable spin * orientation correction, both about the model
+           centre; independent of the camera and shared by both passes. The
+           depth pass uses this same matrix, so the shadow map is rebuilt for the
+           spun pose every frame. */
+        mat4 spinM = mat4_rotate(spin, 0.0f, 1.0f, 0.0f);
         mat4 model = mat4_mul(mat4_translate(center[0], center[1], center[2]),
+                     mat4_mul(spinM,
                      mat4_mul(orientation_matrix(orient_index),
-                              mat4_translate(-center[0], -center[1], -center[2])));
+                              mat4_translate(-center[0], -center[1], -center[2]))));
         float normalMat[9];
         mat3_normal_from_mat4(model, normalMat);
 
