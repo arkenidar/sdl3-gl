@@ -27,6 +27,9 @@
 #include "obj_loader.h"
 #include "mat4.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 /* ------------------------------------------------------------------ *
  * Asset path resolution (copied from sdl3-gl.c): walk up from the
  * executable's directory until the requested relative path is found, so
@@ -144,7 +147,13 @@ static const char* FRAGMENT_SRC =
     "    float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), max(uNs, 1.0)) : 0.0;\n"
     "    float sh = shadow_factor(N, L);\n"
     "    vec3 color = uAmbient * albedo + sh * (albedo * diff + uKs * spec);\n"
-    "    fragColor = vec4(color, uOpacity);\n"
+    "    // Make transparent surfaces (glass) read: a small visibility floor,\n"
+    "    // plus Fresnel (opaque at grazing angles) and specular highlights.\n"
+    "    // Opaque materials (uOpacity = 1) clamp back to fully opaque.\n"
+    "    float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
+    "    float base = (uOpacity < 0.999) ? max(uOpacity, 0.18) : 1.0;\n"
+    "    float alpha = clamp(base + fres + 0.5 * spec, 0.0, 1.0);\n"
+    "    fragColor = vec4(color, alpha);\n"
     "}\n";
 
 static GLuint compile_shader(GLenum type, const char* src)
@@ -194,6 +203,7 @@ static GLuint link_program(const char* vs_src, const char* fs_src)
 typedef struct {
     GLuint   vao, vbo;
     obj_mesh mesh;
+    GLuint*  material_tex;   /* one GL texture per material (0 = none) */
 } gpu_model;
 
 static bool gpu_model_upload(gpu_model* g)
@@ -222,6 +232,53 @@ static bool gpu_model_upload(gpu_model* g)
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     return true;
+}
+
+/* Decode an image (stb_image) and upload it as a 2D texture, caching by path so
+   an image shared by several materials/models loads once. Returns 0 on miss. */
+typedef struct { char path[OBJ_PATH_MAX]; GLuint tex; } tex_cache_entry;
+static tex_cache_entry g_texcache[256];
+static int g_texcache_count = 0;
+
+static GLuint load_texture(const char* path)
+{
+    if (!path || !path[0]) return 0;
+    for (int i = 0; i < g_texcache_count; i++)
+        if (strcmp(g_texcache[i].path, path) == 0) return g_texcache[i].tex;
+
+    int w, h, n;
+    stbi_set_flip_vertically_on_load(1);          /* OBJ UV origin is bottom-left */
+    unsigned char* data = stbi_load(path, &w, &h, &n, 4);
+    if (!data) { SDL_Log("texture load failed: %s (%s)", path, stbi_failure_reason()); return 0; }
+
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    stbi_image_free(data);
+
+    if (g_texcache_count < 256) {
+        snprintf(g_texcache[g_texcache_count].path, OBJ_PATH_MAX, "%s", path);
+        g_texcache[g_texcache_count].tex = tex;
+        g_texcache_count++;
+    }
+    SDL_Log("texture loaded: %s (%dx%d)", path, w, h);
+    return tex;
+}
+
+/* Resolve each material's map_Kd into a GL texture for this model. */
+static void gpu_model_load_textures(gpu_model* g)
+{
+    if (g->mesh.material_count == 0) { g->material_tex = NULL; return; }
+    g->material_tex = (GLuint*)calloc(g->mesh.material_count, sizeof(GLuint));
+    if (!g->material_tex) return;
+    for (size_t i = 0; i < g->mesh.material_count; i++)
+        g->material_tex[i] = load_texture(g->mesh.materials[i].diffuse_map);
 }
 
 /* Axis-aligned bounding box centre and radius over the model's positions
@@ -269,6 +326,37 @@ static void cache_uniforms(GLuint p, uniforms* u)
     u->lightSpace = glGetUniformLocation(p, "uLightSpace");
     u->lightDir   = glGetUniformLocation(p, "uLightDir");
     u->shadowMap  = glGetUniformLocation(p, "uShadowMap");
+}
+
+/* Bind submesh i's material (colour, specular, optional map_Kd on unit 0) and
+   draw it. */
+static void draw_submesh(const gpu_model* g, const uniforms* u, size_t i)
+{
+    const obj_submesh* s = &g->mesh.submeshes[i];
+    float kd[3] = {0.8f,0.8f,0.8f}, ks[3] = {0.2f,0.2f,0.2f};
+    float ns = 32.0f, opacity = 1.0f;
+    GLuint tex = 0;
+    if (s->material >= 0) {
+        const obj_material* mt = &g->mesh.materials[s->material];
+        memcpy(kd, mt->diffuse,  sizeof kd);
+        memcpy(ks, mt->specular, sizeof ks);
+        ns = mt->shininess; opacity = mt->opacity;
+        if (g->material_tex) tex = g->material_tex[s->material];
+    }
+    glUniform3fv(u->kd, 1, kd);
+    glUniform3fv(u->ks, 1, ks);
+    glUniform1f(u->ns, ns);
+    glUniform1f(u->opacity, opacity);
+    glUniform1i(u->hasTexture, tex ? 1 : 0);
+    if (tex) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex); }
+    glDrawArrays(GL_TRIANGLES, (GLint)s->first_vertex, (GLsizei)s->vertex_count);
+}
+
+/* Opacity of submesh i (1 when it has no material). */
+static float submesh_opacity(const gpu_model* g, size_t i)
+{
+    int m = g->mesh.submeshes[i].material;
+    return (m >= 0) ? g->mesh.materials[m].opacity : 1.0f;
 }
 
 /* Shadow map: a depth-only framebuffer + depth texture. CLAMP_TO_BORDER with a
@@ -389,6 +477,7 @@ int main(int argc, char* argv[])
             return 1;
         }
         gpu_model_upload(&models[i]);
+        gpu_model_load_textures(&models[i]);
         model_bounds(&models[i].mesh, mcenter[i], &mradius[i]);
         SDL_Log("model %d: %s  (%zu verts, %zu submeshes, %zu materials)", i,
                 model_paths[i], models[i].mesh.vertex_count,
@@ -611,37 +700,34 @@ int main(int argc, char* argv[])
         glUniform3fv(u.viewPos,  1, eye);
         glUniform3fv(u.lightDir, 1, keyDir);
         glUniform3f(u.ambient, ambient, ambient, ambient);  /* flat ambient fill */
-        glUniform1i(u.hasTexture, 0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, sm.tex);
         glUniform1i(u.shadowMap, 1);
+        glUniform1i(u.tex, 0);           /* material diffuse map on unit 0 */
 
         glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
         if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
         glBindVertexArray(g->vao);
-        for (size_t i = 0; i < g->mesh.submesh_count; i++) {
-            obj_submesh* s = &g->mesh.submeshes[i];
-            /* default material when a submesh has none */
-            float kd[3] = {0.8f,0.8f,0.8f}, ks[3] = {0.2f,0.2f,0.2f};
-            float ns = 32.0f, opacity = 1.0f;
-            if (s->material >= 0) {
-                obj_material* mt = &g->mesh.materials[s->material];
-                memcpy(kd, mt->diffuse,  sizeof kd);
-                memcpy(ks, mt->specular, sizeof ks);
-                ns = mt->shininess; opacity = mt->opacity;
-            }
-            glUniform3fv(u.kd, 1, kd);
-            glUniform3fv(u.ks, 1, ks);
-            glUniform1f(u.ns, ns);
-            glUniform1f(u.opacity, opacity);
-            glDrawArrays(GL_TRIANGLES, (GLint)s->first_vertex, (GLsizei)s->vertex_count);
-        }
+
+        /* opaque submeshes first... */
+        for (size_t i = 0; i < g->mesh.submesh_count; i++)
+            if (submesh_opacity(g, i) >= 0.999f) draw_submesh(g, &u, i);
+
+        /* ...then transparent ones (e.g. glass), alpha-blended and without
+           writing depth so they don't occlude each other. */
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        for (size_t i = 0; i < g->mesh.submesh_count; i++)
+            if (submesh_opacity(g, i) < 0.999f) draw_submesh(g, &u, i);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
 
         SDL_GL_SwapWindow(window);
         SDL_Delay(16);
     }
 
-    for (int i = 0; i < NUM_MODELS; i++) obj_free(&models[i].mesh);
+    for (int i = 0; i < NUM_MODELS; i++) { free(models[i].material_tex); obj_free(&models[i].mesh); }
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();
