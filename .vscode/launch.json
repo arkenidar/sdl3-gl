@@ -2,17 +2,42 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug sdl3-gl (gdb)",
+      "name": "Debug sdl3-glsl (gdb)",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/sdl3-gl",
+      "program": "${workspaceFolder}/build/sdl3-glsl.exe",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "environment": [],
+      "environment": [
+        { "name": "PATH", "value": "C:/msys64/mingw64/bin;${env:PATH}" }
+      ],
       "externalConsole": false,
       "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerPath": "C:/msys64/mingw64/bin/gdb.exe",
+      "preLaunchTask": "cmake build",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Debug sdl3-gl (gdb)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/sdl3-gl.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        { "name": "PATH", "value": "C:/msys64/mingw64/bin;${env:PATH}" }
+      ],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "C:/msys64/mingw64/bin/gdb.exe",
       "preLaunchTask": "cmake build",
       "setupCommands": [
         {
