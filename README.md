@@ -11,6 +11,8 @@ SDL1 OpenGL tutorial (Michael Vance, 2000), ported SDL1 → SDL2 → **SDL3**.
   header, [parse.h](parse.h)
 - Lit, smooth-shaded rendering with a rotating camera/model
 - Three switchable scenes and a wireframe toggle
+- Optional **VBO** (vertex-buffer-object) rendering path with automatic
+  fall-back to immediate mode (see [Rendering paths](#rendering-paths))
 - Working-directory-independent asset loading (see [Assets](#assets))
 
 ## Requirements
@@ -44,8 +46,30 @@ on its own (see below).
 | `Space`        | Toggle rotation                 |
 | `Enter`        | Cycle through the 3 scenes      |
 | `W`            | Toggle wireframe rendering      |
+| `B`            | Toggle VBO / immediate-mode path (when VBOs are available) |
 | `Esc`          | Quit                            |
 | Window close   | Quit                            |
+
+## Rendering paths
+
+The model renderer has two interchangeable back-ends that produce identical
+output:
+
+- **Immediate mode** — the original `glBegin(GL_TRIANGLES)` / `glVertex3f`
+  path. Always available; used as the fallback.
+- **VBO** — uploads each model once into an interleaved
+  `[normal, position]` vertex-buffer object and draws it with
+  `glDrawArrays` plus the fixed-function client-state arrays
+  (`glNormalPointer` / `glVertexPointer`).
+
+The VBO entry points are part of OpenGL 1.5, which the legacy `<GL/gl.h>`
+typically does not expose, so they are resolved at runtime via
+`SDL_GL_GetProcAddress()` (using the `PFNGL...PROC` typedefs from
+`<GL/glext.h>`). No extension loader such as GLEW/GLAD is required. If the
+functions cannot be loaded the program logs a notice and stays in immediate
+mode; otherwise it defaults to the VBO path. Press `B` to switch between the
+two at runtime. See `load_gl_vbo_functions()`, `upload_model_vbo()` and
+`draw_model_vbo()` in [sdl3-gl.c](sdl3-gl.c).
 
 ## Assets
 

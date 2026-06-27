@@ -74,6 +74,7 @@ model load_model_obj(const char* file_name){ // "main.c" -> "parse.h" -> "head.o
   loaded.mesh.array=NULL; loaded.mesh.count=0;
   loaded.vertex_positions.array=NULL; loaded.vertex_positions.count=0;
   loaded.vertex_normals.array=NULL; loaded.vertex_normals.count=0;
+  loaded.vbo=0; loaded.vertex_count=0; // GPU-side VBO copy, filled in later
 
   FILE* file = fopen(file_name,"r"); char line[1001]; char* next;
   if(!file) { puts("could not open file!"); exit(1); }

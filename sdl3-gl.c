@@ -32,6 +32,7 @@ All OpenGL calls are unchanged across the migration.
 #include <SDL3/SDL.h>
 #include <GL/gl.h>
 #include <GL/glu.h>
+#include <GL/glext.h>   /* PFNGL...PROC typedefs + GL 1.5 VBO tokens */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,40 @@ static GLboolean should_rotate = GL_TRUE;
 static int scene = 0;
 
 SDL_Window* window;
+
+/* ------------------------------------------------------------------ *
+ * Optional VBO (vertex-buffer-object) rendering path.
+ *
+ * Conservative by design: the VBO entry points are part of OpenGL 1.5,
+ * which the legacy <GL/gl.h> on most systems does not expose, so we
+ * resolve them at runtime via SDL_GL_GetProcAddress(). If any pointer
+ * fails to load, vbo_available stays false and the program transparently
+ * keeps using the original immediate-mode (glBegin/glEnd) path.
+ *
+ * When the buffers are available we default to the VBO path (use_vbo),
+ * and the 'B' key toggles between VBO and immediate mode at runtime.
+ * ------------------------------------------------------------------ */
+static PFNGLGENBUFFERSPROC    p_glGenBuffers    = NULL;
+static PFNGLBINDBUFFERPROC    p_glBindBuffer    = NULL;
+static PFNGLBUFFERDATAPROC    p_glBufferData    = NULL;
+static PFNGLDELETEBUFFERSPROC p_glDeleteBuffers = NULL;
+
+static bool vbo_available = false;  /* set once after context creation  */
+static bool use_vbo       = false;  /* runtime toggle (B); honored only
+                                       when vbo_available is true        */
+
+/* Load the GL 1.5 buffer functions. Returns true if all are present. */
+static bool load_gl_vbo_functions( void )
+{
+    p_glGenBuffers    = (PFNGLGENBUFFERSPROC)    SDL_GL_GetProcAddress( "glGenBuffers" );
+    p_glBindBuffer    = (PFNGLBINDBUFFERPROC)    SDL_GL_GetProcAddress( "glBindBuffer" );
+    p_glBufferData    = (PFNGLBUFFERDATAPROC)    SDL_GL_GetProcAddress( "glBufferData" );
+    p_glDeleteBuffers = (PFNGLDELETEBUFFERSPROC) SDL_GL_GetProcAddress( "glDeleteBuffers" );
+
+    vbo_available = p_glGenBuffers && p_glBindBuffer &&
+                    p_glBufferData && p_glDeleteBuffers;
+    return vbo_available;
+}
 
 
 static void quit_tutorial( int code )
@@ -86,6 +121,13 @@ static void handle_key_down( SDL_Keycode key )
     case SDLK_W: // wire-frame toggle
       wireframe = !wireframe;
       glPolygonMode( GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL );
+      break;
+
+    case SDLK_B: // VBO / immediate-mode toggle (only if VBOs loaded)
+      if( vbo_available ) {
+        use_vbo = !use_vbo;
+        SDL_Log( "rendering path: %s", use_vbo ? "VBO" : "immediate" );
+      }
       break;
 
     default:
@@ -139,9 +181,55 @@ typedef struct {
 vector_array vertex_positions;
 vector_array vertex_normals;
 triangle_array mesh;
+/* Optional GPU-side copy used by the VBO path. vbo==0 means "not
+   uploaded"; the immediate-mode path ignores these fields entirely. */
+GLuint vbo;            /* buffer name, 0 when unallocated         */
+GLsizei vertex_count;  /* number of vertices stored in the buffer */
 } model;
 
 #include "parse.h" // parse model to load
+
+/* Interleaved layout uploaded to the VBO: normal (3 floats) followed by
+   position (3 floats) per vertex. Matches the glNormal/glVertex order of
+   the immediate-mode path so lighting/material results are identical. */
+#define VBO_FLOATS_PER_VERTEX 6
+#define VBO_STRIDE_BYTES      ( VBO_FLOATS_PER_VERTEX * (GLsizei)sizeof(float) )
+
+/* Flatten the indexed triangles into an interleaved array and upload it to
+   a GL buffer object. Safe no-op if VBOs are unavailable or the mesh is
+   empty. Dereferences the .obj indices exactly like draw_triangle(). */
+static void upload_model_vbo( model* m )
+{
+    if( !vbo_available || !m || m->mesh.count <= 0 ) return;
+
+    GLsizei verts = (GLsizei)m->mesh.count * 3;
+    float* data = (float*)malloc( (size_t)verts * VBO_FLOATS_PER_VERTEX * sizeof(float) );
+    if( !data ) return;
+
+    float* w = data;
+    for( int i = 0; i < m->mesh.count; i++ ) {
+        triangle t = m->mesh.array[i];
+        /* (position index, normal index) pairs for the 3 corners */
+        const int pos_idx[3] = { t.array[0], t.array[2], t.array[4] };
+        const int nrm_idx[3] = { t.array[1], t.array[3], t.array[5] };
+        for( int c = 0; c < 3; c++ ) {
+            vector n = m->vertex_normals.array[ nrm_idx[c] - 1 ];
+            vector p = m->vertex_positions.array[ pos_idx[c] - 1 ];
+            *w++ = n.array[0]; *w++ = n.array[1]; *w++ = n.array[2];
+            *w++ = p.array[0]; *w++ = p.array[1]; *w++ = p.array[2];
+        }
+    }
+
+    p_glGenBuffers( 1, &m->vbo );
+    p_glBindBuffer( GL_ARRAY_BUFFER, m->vbo );
+    p_glBufferData( GL_ARRAY_BUFFER,
+                    (GLsizeiptr)verts * VBO_STRIDE_BYTES,
+                    data, GL_STATIC_DRAW );
+    p_glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+    m->vertex_count = verts;
+    free( data );
+}
 
 void draw_triangle(triangle t, model m){
 
@@ -163,11 +251,41 @@ void draw_triangle(triangle t, model m){
   glVertex3f(vertex_position.array[0],vertex_position.array[1],vertex_position.array[2]);
 }
 
-void draw_model(model m){
+/* Original immediate-mode path (glBegin/glEnd), kept as the fallback. */
+void draw_model_immediate(model m){
   glBegin(GL_TRIANGLES);
     for(int i=0; i<m.mesh.count; i++)
     draw_triangle(m.mesh.array[i],m);
   glEnd();
+}
+
+/* VBO path: bind the interleaved buffer and draw it with the fixed-function
+   client-state arrays, so lighting/material behave exactly as before. */
+void draw_model_vbo(model m){
+  p_glBindBuffer( GL_ARRAY_BUFFER, m.vbo );
+
+  glEnableClientState( GL_NORMAL_ARRAY );
+  glEnableClientState( GL_VERTEX_ARRAY );
+
+  /* normal at offset 0, position at offset 3 floats (12 bytes) */
+  glNormalPointer( GL_FLOAT, VBO_STRIDE_BYTES, (const void*)0 );
+  glVertexPointer( 3, GL_FLOAT, VBO_STRIDE_BYTES, (const void*)(3 * sizeof(float)) );
+
+  glDrawArrays( GL_TRIANGLES, 0, m.vertex_count );
+
+  glDisableClientState( GL_VERTEX_ARRAY );
+  glDisableClientState( GL_NORMAL_ARRAY );
+
+  p_glBindBuffer( GL_ARRAY_BUFFER, 0 );
+}
+
+/* Dispatcher: use the VBO path when enabled, available, and the model has
+   actually been uploaded; otherwise fall back to immediate mode. */
+void draw_model(model m){
+  if( use_vbo && vbo_available && m.vbo != 0 && m.vertex_count > 0 )
+    draw_model_vbo(m);
+  else
+    draw_model_immediate(m);
 }
 
 model cube;
@@ -493,8 +611,21 @@ int main( int argc, char* argv[] )
      */
     setup_opengl( width, height );
 
+    /* Try to load the GL 1.5 buffer functions. On success we default to the
+       VBO path; otherwise everything stays in immediate mode. */
+    if( load_gl_vbo_functions() ) {
+        use_vbo = true;
+        SDL_Log( "VBO support detected: using VBO path (press B to toggle)." );
+    } else {
+        SDL_Log( "VBO functions unavailable: using immediate-mode path." );
+    }
+
     model model1=load_model_obj(asset_path("assets/head.obj"));
     cube=load_model_obj(asset_path("assets/cube.obj"));
+
+    /* Upload GPU copies for the VBO path (no-op if VBOs are unavailable). */
+    upload_model_vbo( &model1 );
+    upload_model_vbo( &cube );
 
     /*
      * Now we want to begin our normal app process--
