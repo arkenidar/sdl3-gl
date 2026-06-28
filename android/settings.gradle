@@ -1,0 +1,3 @@
+// SDL3-GLSL Android app.
+rootProject.name = "sdl3-glsl"
+include ':app'

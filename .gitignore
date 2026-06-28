@@ -1,3 +1,14 @@
 
 # CMake build directories (desktop /build/, GLES /build-gles/, etc.)
 /build*/
+
+# Android / Gradle
+/android/local.properties
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/.idea/
+/android/*.iml
+.gradle/
+

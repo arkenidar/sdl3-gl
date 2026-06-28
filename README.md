@@ -194,12 +194,22 @@ is skipped automatically when `SDL3GLSL_USE_GLES=ON`.
 
 #### Packaged APK
 
-**Android** is not yet packaged. The renderer/shaders are ES-ready, but an APK
-still needs: an Android Studio/Gradle + NDK project wrapping SDL3 (with
-`SDL_main`), and asset loading routed through `SDL_IOStream`/`AAsset` — the
-current `asset_path()` walk-up over the filesystem (`fopen`) doesn't see files
-packed inside an APK. Those are build-packaging steps on top of the now-portable
-C/GLSL code.
+**Android** has a Gradle/NDK wrapper under [android/](android/) — see
+[android/README.md](android/README.md). It builds an installable APK that bundles
+SDL3 (a pinned `libsdl-org/SDL` submodule) and the modern renderer as `libmain.so`
+via `SDL_main`:
+
+```bash
+cd android
+git submodule update --init --depth 1 SDL    # first time
+./gradlew assembleDebug                       # -> app/build/outputs/apk/debug/app-debug.apk
+```
+
+The app builds, installs and launches. One step remains before it's fully usable:
+asset loading must be routed through `SDL_IOStream`/`AAsset`. The current
+`asset_path()` walk-up and `obj_loader.h` use `fopen`, which doesn't see files
+packed inside an APK — the models are bundled correctly but not yet read on
+device. Details and the fix are in [android/README.md](android/README.md#-known-limitation-asset-loading).
 
 ## Assets
 

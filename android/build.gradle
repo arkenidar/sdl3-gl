@@ -1,0 +1,22 @@
+// Top-level build file. Mirrors the AGP/Gradle versions used by SDL's own
+// android-project template (AGP 8.7.3 + Gradle 8.12), the best-tested combo.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.3'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
