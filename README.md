@@ -47,17 +47,29 @@ sudo apt install build-essential cmake libsdl3-dev libgl1-mesa-dev libglu1-mesa-
 ## Build & run
 
 ```sh
-cmake -S . -B build -DSDL3GLSL_USE_GLES=OFF   # desktop GL 3.3; ON for OpenGL ES 3.0
+cmake -S . -B build
 cmake --build build
-./build/sdl3-gl        # legacy fixed-function renderer
-./build/sdl3-glsl      # modern core-profile 3.3 + GLSL renderer
+./build/sdl3-gl         # legacy fixed-function renderer (desktop GL + GLU)
+./build/sdl3-glsl       # modern core-profile 3.3 + GLSL renderer (desktop GL)
+./build/sdl3-glsl-gles  # modern renderer against OpenGL ES 3.0 (if built)
 ```
 
-`SDL3GLSL_USE_GLES` has no default and **must** be set at configure time —
-`=OFF` for the desktop GL 3.3 backend, `=ON` for OpenGL ES 3.0 (see
-[OpenGL ES 3.0 / mobile portability](#opengl-es-30--mobile-portability)). Both
-executables build and run independently, and either can be launched from any
-directory — they locate the `assets/` folder on their own (see below).
+Each renderer is its own target, gated by an option that **defaults to what your
+platform provides** (no flag is required):
+
+| Option | Target | Default |
+|--------|--------|---------|
+| `SDL3GL_BUILD_GL` | `sdl3-gl` | ON when GLU is found |
+| `SDL3GL_BUILD_GLSL` | `sdl3-glsl` | ON when desktop OpenGL is found |
+| `SDL3GL_BUILD_GLSL_GLES` | `sdl3-glsl-gles` | ON when `libGLESv2` is found |
+
+So a desktop Linux/Mesa box builds all three; a plain Windows/macOS box builds
+the two desktop targets and skips GLES; a Termux box (no GLU) builds only
+`sdl3-glsl-gles`. Override any default with e.g. `-DSDL3GL_BUILD_GLSL_GLES=ON`
+(see [OpenGL ES 3.0 / mobile portability](#opengl-es-30--mobile-portability)).
+Each executable builds and runs independently and locates the `assets/` folder
+on its own (see below); build just one with
+`cmake --build build --target sdl3-glsl`.
 
 ## Controls
 
@@ -178,9 +190,9 @@ To build and run the ES path on a desktop with Mesa GLES (a quick way to test
 the mobile renderer without a device):
 
 ```sh
-cmake -S . -B build-gles -DSDL3GLSL_USE_GLES=ON   # links GLESv2, defines USE_GLES
-cmake --build build-gles
-./build-gles/sdl3-glsl
+cmake -S . -B build-gles -DSDL3GL_BUILD_GLSL_GLES=ON   # links GLESv2, defines USE_GLES
+cmake --build build-gles --target sdl3-glsl-gles
+./build-gles/sdl3-glsl-gles
 ```
 
 #### On a real device via Termux (no APK, no code changes)
@@ -196,17 +208,18 @@ pkg install x11-repo
 pkg install termux-x11-nightly mesa mesa-dev sdl3 cmake clang   # verify: pkg search sdl3
 # launch the Termux:X11 app, then back in Termux:
 export DISPLAY=:0
-cmake -S . -B build-gles -DSDL3GLSL_USE_GLES=ON
-cmake --build build-gles
-./build-gles/sdl3-glsl
+cmake -S . -B build-gles -DSDL3GL_BUILD_GLSL_GLES=ON
+cmake --build build-gles --target sdl3-glsl-gles
+./build-gles/sdl3-glsl-gles
 ```
 
 Notes: if `sdl3` isn't packaged for your Termux, build SDL3 from source. GLES is
 served through the host GPU via **virgl** or **zink-over-Vulkan** (Turnip on
 Adreno, Panfrost on Mali), so performance depends on the device and driver. The
-GLES configure needs **no GLU** and does **not** build the legacy fixed-function
-`sdl3-gl` — that target is desktop-only (it uses GLU and the matrix stack), so it
-is skipped automatically when `SDL3GLSL_USE_GLES=ON`.
+GLES target needs **no GLU**, and the legacy fixed-function `sdl3-gl` is
+desktop-only (it uses GLU and the matrix stack) — on a GLES-only platform like
+Termux the desktop targets simply default OFF (no GLU/desktop GL to find), so
+`sdl3-glsl-gles` is the only thing that builds.
 
 #### Packaged APK
 
