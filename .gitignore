@@ -1,3 +1,3 @@
 
-# CMake build directory
-/build/
+# CMake build directories (desktop /build/, GLES /build-gles/, etc.)
+/build*/
