@@ -126,7 +126,7 @@ static const char* FRAGMENT_SRC =
     "    vec3 p = vLightPos.xyz / vLightPos.w;\n"
     "    p = p * 0.5 + 0.5;\n"
     "    if (p.z > 1.0) return 1.0;            // beyond the light's far plane\n"
-    "    float bias = max(0.0025 * (1.0 - dot(N, L)), 0.0006);\n"
+    "    float bias = max(0.0090 * (1.0 - dot(N, L)), 0.0020);\n"
     "    float cur = p.z - bias;\n"
     "    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));\n"
     "    float sum = 0.0;\n"
@@ -750,17 +750,20 @@ int main(int argc, char* argv[])
         glUseProgram(depthProg);
         glUniformMatrix4fv(dLightSpace, 1, GL_FALSE, lightSpace.m);
         glUniformMatrix4fv(dModel,      1, GL_FALSE, model.m);
-        /* Record BACK faces (cull front) so a convex surface never shadows
-           itself - the main fix for acne on the smooth meshes - with a small
-           polygon offset as backup. */
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT);
+        /* Push the recorded depth AWAY from the light with a slope-scaled
+           polygon offset, rather than culling front faces. The "cull front,
+           record back faces" trick only works on a closed convex mesh with
+           consistent winding; these OBJs are double-sided with inconsistent
+           winding (see the camera pass / 'C' toggle), so culling here keeps the
+           wrong face on some triangles and the stored depth flips per frame ->
+           shimmering self-shadow acne on the thin two-sided panels (e.g. the
+           table). Offset alone is winding-agnostic and stable. */
+        glDisable(GL_CULL_FACE);
         glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(1.5f, 2.0f);
+        glPolygonOffset(2.5f, 4.0f);
         glBindVertexArray(g->vao);
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)g->mesh.vertex_count);
         glDisable(GL_POLYGON_OFFSET_FILL);
-        glCullFace(GL_BACK);               /* restore for the camera pass */
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         /* ---- pass 2: shade the scene from the camera ---- */
