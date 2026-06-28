@@ -635,6 +635,27 @@ int main(int argc, char* argv[])
             (const char*)glGetString(GL_VERSION));
 #endif
 
+    /* Capabilities banner: vendor, GLSL level, and the GL context attributes
+       SDL actually negotiated (may differ from what we requested above). Handy
+       for confirming what a given device/driver supports — e.g. Mali on Android
+       reports "OpenGL ES 3.2" here even though we only ask for a 3.0 context. */
+    {
+        int amaj = 0, amin = 0, prof = 0, depth = 0, dbl = 0;
+        SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &amaj);
+        SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &amin);
+        SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &prof);
+        SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &depth);
+        SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &dbl);
+        SDL_Log("  vendor:  %s", (const char*)glGetString(GL_VENDOR));
+        SDL_Log("  GLSL:    %s", (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION));
+        SDL_Log("  context: %d.%d  profile=%s  depth=%d  doublebuffer=%d",
+                amaj, amin,
+                prof == SDL_GL_CONTEXT_PROFILE_ES ? "ES" :
+                prof == SDL_GL_CONTEXT_PROFILE_CORE ? "core" :
+                prof == SDL_GL_CONTEXT_PROFILE_COMPATIBILITY ? "compat" : "?",
+                depth, dbl);
+    }
+
     GLuint prog = link_program(VERTEX_SRC, FRAGMENT_SRC);
     if (!prog) return 1;
     uniforms u;
