@@ -136,6 +136,41 @@ image and binds it per submesh. The bundled **Oriental Table** exercises this
 end-to-end (four textured materials); the **Victory Car** shows multi-material
 colour with translucent glass.
 
+### OpenGL ES 3.0 / mobile portability
+
+`sdl3-glsl.c` builds from one source against **either** desktop OpenGL 3.3 core
+**or** OpenGL ES 3.0 (Android, iOS, web), selected by the `APP_USE_GLES` switch
+at the top of the file. GLES 3.0 implements the GL 3.3 subset the renderer uses
+(VAOs, sized internal formats, depth textures, `glGetStringi`, GLSL
+`#version 300 es`); the few desktop-only calls are handled per-backend:
+
+- shaders carry no `#version` line — `compile_shader()` prepends `#version 330
+  core` or `#version 300 es` plus the ES precision qualifiers;
+- the GL loader (**GLAD**) is desktop-only; the ES path links the GLES library
+  directly and skips it;
+- `glPolygonMode` (wireframe, `W`) and `glDrawBuffer` don't exist in GLES —
+  wireframe is a no-op there, and the depth FBO uses `glDrawBuffers`;
+- `CLAMP_TO_BORDER` + depth border colour are replaced by a light-frustum bounds
+  check in the shadow shader, so `CLAMP_TO_EDGE` (all GLES has) behaves the same;
+- the shadow depth texture uploads as `GL_UNSIGNED_INT` (the format/type combo
+  GLES requires for `DEPTH_COMPONENT24`).
+
+To build and run the ES path on a desktop with Mesa GLES (a quick way to test
+the mobile renderer without a device):
+
+```sh
+cmake -S . -B build-gles -DSDL3GLSL_USE_GLES=ON   # links GLESv2, defines USE_GLES
+cmake --build build-gles
+./build-gles/sdl3-glsl
+```
+
+**Android** is not yet packaged. The renderer/shaders are ES-ready, but an APK
+still needs: an Android Studio/Gradle + NDK project wrapping SDL3 (with
+`SDL_main`), and asset loading routed through `SDL_IOStream`/`AAsset` — the
+current `asset_path()` walk-up over the filesystem (`fopen`) doesn't see files
+packed inside an APK. Those are build-packaging steps on top of the now-portable
+C/GLSL code.
+
 ## Assets
 
 Models live in [assets/](assets/) (`head.obj`, `cube.obj`). At startup the
