@@ -187,7 +187,10 @@ cmake --build build-gles
 
 Notes: if `sdl3` isn't packaged for your Termux, build SDL3 from source. GLES is
 served through the host GPU via **virgl** or **zink-over-Vulkan** (Turnip on
-Adreno, Panfrost on Mali), so performance depends on the device and driver.
+Adreno, Panfrost on Mali), so performance depends on the device and driver. The
+GLES configure needs **no GLU** and does **not** build the legacy fixed-function
+`sdl3-gl` — that target is desktop-only (it uses GLU and the matrix stack), so it
+is skipped automatically when `SDL3GLSL_USE_GLES=ON`.
 
 #### Packaged APK
 
