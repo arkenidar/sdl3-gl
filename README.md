@@ -110,17 +110,28 @@ entry points are loaded with **GLAD** (generated under [glad/](glad/)); no GLU.
 
 ### Controls
 
-| Input | Action |
-| ----- | ------ |
-| Left-drag / one-finger drag | Orbit the camera |
-| Mouse wheel / two-finger pinch | Zoom |
-| `Enter` | Cycle model (car → table → head → cube) |
-| `Space` | Toggle auto-rotation |
-| `↑` / `↓` | Brighten / darken ambient fill |
-| `O` | Cycle orientation presets (corrects Z-up exports) |
-| `W` | Toggle wireframe |
-| `C` | Toggle back-face culling (off by default — assets have mixed winding) |
-| `Esc` | Quit |
+| Input | Button | Action |
+| ----- | ------ | ------ |
+| Left-drag / one-finger drag | — | Orbit the camera |
+| Mouse wheel / two-finger pinch | — | Zoom |
+| `Space` | `R` | Toggle auto-rotation |
+| `Enter` | `>` | Cycle model (car → table → head → cube) |
+| `W` | `W` | Toggle wireframe (desktop only — GLES has no `glPolygonMode`) |
+| `L` | `L` | Toggle key light (directional sun ↔ positioned point source) |
+| `C` | `C` | Toggle back-face culling (off by default — assets have mixed winding) |
+| `O` | `O` | Cycle orientation presets (corrects Z-up exports) |
+| `↑` / `↓` (or `]` / `[`) | `+` / `-` | Brighten / darken ambient fill |
+| — | `K` | Show / hide the on-screen (soft) keyboard |
+| `Esc` | `X` | Quit |
+
+**On-screen controls.** Every keyboard control above is also a tappable button,
+so the app is fully usable on a phone or tablet with no physical keyboard. The
+button strip is **responsive**: a vertical column down the left in portrait, a
+horizontal row across the bottom in landscape, sized to fit the long edge. The
+same hit-testing drives mouse taps on desktop, so behaviour stays in sync across
+platforms. A tap on a button never starts an orbit/pinch gesture. Drawn by a
+small 2D shader over the scene, with a 5×7 bitmap-font atlas for the glyphs (see
+`hud_draw()` / `apply_action()` in [sdl3-glsl.c](sdl3-glsl.c)).
 
 ### Asset bundles (OBJ + MTL + image)
 

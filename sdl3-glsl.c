@@ -615,6 +615,274 @@ static void set_wireframe(bool on)
 #endif
 }
 
+/* ------------------------------------------------------------------ *
+ * Control actions. Every interactive control routes through apply_action()
+ * so the physical keyboard (SDL_EVENT_KEY_DOWN) and the on-screen HUD buttons
+ * (touch / mouse taps) drive the exact same code. The viewer state these
+ * actions mutate lives as locals in main(); `controls` gathers pointers to
+ * them plus the read-only framing data the actions need.
+ * ------------------------------------------------------------------ */
+typedef enum {
+    ACT_QUIT, ACT_ROTATE, ACT_NEXT_MODEL, ACT_WIREFRAME, ACT_LIGHT,
+    ACT_CULL, ACT_ORIENT, ACT_AMBIENT_UP, ACT_AMBIENT_DOWN, ACT_TEXTINPUT
+} action;
+
+typedef struct {
+    SDL_Window*  window;
+    bool*  running;
+    bool*  rotate;
+    bool*  wireframe;
+    bool*  lightIsPoint;
+    bool*  cull;
+    float* ambient;
+    int*   mi;
+    float* distance;
+    int*   orient_index;            /* [num_models] */
+    const float* mradius;           /* [num_models] */
+    const char* const* model_paths; /* [num_models] */
+    int    num_models;
+    float  fovy;
+} controls;
+
+static void apply_action(const controls* c, action a)
+{
+    switch (a) {
+    case ACT_QUIT:      *c->running = false; break;
+    case ACT_ROTATE:    *c->rotate = !*c->rotate; break;
+    case ACT_NEXT_MODEL:
+        *c->mi = (*c->mi + 1) % c->num_models;
+        *c->distance = c->mradius[*c->mi] / sinf(c->fovy * 0.5f) * 1.2f;
+        SDL_Log("model %d: %s", *c->mi, c->model_paths[*c->mi]);
+        break;
+    case ACT_WIREFRAME: *c->wireframe = !*c->wireframe; break;
+    case ACT_LIGHT:     *c->lightIsPoint = !*c->lightIsPoint;
+        SDL_Log("light: %s", *c->lightIsPoint ? "point source" : "directional sun"); break;
+    case ACT_CULL:      *c->cull = !*c->cull;
+        SDL_Log("backface culling: %s", *c->cull ? "on" : "off"); break;
+    case ACT_ORIENT:
+        c->orient_index[*c->mi] = (c->orient_index[*c->mi] + 1) % ORIENT_COUNT;
+        SDL_Log("model %d orientation preset %d/%d", *c->mi,
+                c->orient_index[*c->mi], ORIENT_COUNT - 1);
+        break;
+    case ACT_AMBIENT_UP:   *c->ambient = fminf(1.0f, *c->ambient + 0.05f);
+        SDL_Log("ambient: %.2f", *c->ambient); break;
+    case ACT_AMBIENT_DOWN: *c->ambient = fmaxf(0.0f, *c->ambient - 0.05f);
+        SDL_Log("ambient: %.2f", *c->ambient); break;
+    case ACT_TEXTINPUT:
+        /* Summon / dismiss the platform soft keyboard on demand. On Android this
+           pops the system IME; on desktop it just toggles SDL text-input mode.
+           Gated behind a button so the keyboard never occludes the viewer unless
+           asked for. There is no text field yet, so SDL_EVENT_TEXT_INPUT is a
+           stub (see the event loop) until one exists. */
+        if (SDL_TextInputActive(c->window)) SDL_StopTextInput(c->window);
+        else                                SDL_StartTextInput(c->window);
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * On-screen HUD: a vertical strip of touch buttons that fire control
+ * actions, so the keyboard-only controls above are reachable on a phone or
+ * tablet (which has no physical keyboard). It draws over the scene with a
+ * tiny 2D shader and a 5x7 bitmap font baked into an R8 texture atlas.
+ * ------------------------------------------------------------------ */
+static const char* HUD_VERTEX_SRC =
+    "layout(location=0) in vec2 aPos;\n"   /* clip-space position */
+    "layout(location=1) in vec2 aUV;\n"
+    "layout(location=2) in vec4 aColor;\n"
+    "out vec2 vUV;\n"
+    "out vec4 vColor;\n"
+    "void main(){ vUV = aUV; vColor = aColor; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+
+static const char* HUD_FRAGMENT_SRC =
+    "in vec2 vUV;\n"
+    "in vec4 vColor;\n"
+    "uniform sampler2D uFont;\n"
+    "uniform int uUseTex;\n"            /* 1 = glyph (mask by font.r), 0 = solid quad */
+    "out vec4 fragColor;\n"
+    "void main(){\n"
+    "    float a = (uUseTex == 1) ? texture(uFont, vUV).r : 1.0;\n"
+    "    fragColor = vec4(vColor.rgb, vColor.a * a);\n"
+    "}\n";
+
+/* Each button: a glyph (drawn from the font) and the action it fires. The
+   glyph letters mirror the keyboard hotkeys where one exists (W/L/C/O). */
+static const struct { char glyph; action act; } HUD_BUTTONS[] = {
+    { 'R', ACT_ROTATE },      { '>', ACT_NEXT_MODEL }, { 'W', ACT_WIREFRAME },
+    { 'L', ACT_LIGHT },       { 'C', ACT_CULL },       { 'O', ACT_ORIENT },
+    { '+', ACT_AMBIENT_UP },  { '-', ACT_AMBIENT_DOWN },
+    { 'K', ACT_TEXTINPUT },   { 'X', ACT_QUIT },
+};
+#define HUD_COUNT ((int)(sizeof HUD_BUTTONS / sizeof HUD_BUTTONS[0]))
+
+/* 5-wide x 7-tall glyphs, one byte per row (low 5 bits, MSB = leftmost). Only
+   the characters used by HUD_BUTTONS are defined; FONT_ORDER gives atlas order. */
+static const char FONT_ORDER[] = "RW LCO+-KX>";
+static const unsigned char FONT_5x7[][7] = {
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, /* R */
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11}, /* W */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, /* L */
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, /* C */
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, /* O */
+    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00}, /* + */
+    {0x00,0x00,0x00,0x1F,0x00,0x00,0x00}, /* - */
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, /* K */
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, /* X */
+    {0x10,0x08,0x04,0x02,0x04,0x08,0x10}, /* > */
+};
+#define FONT_GLYPH_W 5
+#define FONT_GLYPH_H 7
+
+static int font_index(char c)
+{
+    for (int i = 0; FONT_ORDER[i]; i++) if (FONT_ORDER[i] == c) return i;
+    return 2; /* space */
+}
+
+/* Bake the glyphs into a single R8 atlas, one 5x7 cell per glyph in row 0. */
+static GLuint hud_font_texture(void)
+{
+    const int n = (int)(sizeof FONT_5x7 / sizeof FONT_5x7[0]);
+    const int aw = n * FONT_GLYPH_W, ah = FONT_GLYPH_H;
+    unsigned char* px = (unsigned char*)calloc((size_t)aw * ah, 1);
+    for (int g = 0; g < n; g++)
+        for (int row = 0; row < FONT_GLYPH_H; row++)
+            for (int col = 0; col < FONT_GLYPH_W; col++)
+                if (FONT_5x7[g][row] & (1 << (FONT_GLYPH_W - 1 - col)))
+                    px[row * aw + g * FONT_GLYPH_W + col] = 255;
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, aw, ah, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    free(px);
+    return tex;
+}
+
+/* Clip-space rect for button i, given the framebuffer aspect (w/h). The strip
+   runs along the window's LONG edge so it always fits: a vertical column down
+   the left in portrait, a horizontal row across the bottom in landscape. Buttons
+   are square on screen, sized to the short edge but shrunk if needed so the whole
+   strip fits the long edge. Used for both drawing and hit-testing. */
+static void hud_button_rect(int i, float aspect,
+                            float* x0, float* y0, float* x1, float* y1)
+{
+    const float f = 0.11f;              /* button size as fraction of the short edge */
+    const float margin = 0.05f;         /* clip-space margin from the window edges */
+    const float gap_frac = 0.22f;       /* gap between buttons, as fraction of size */
+    bool landscape = aspect >= 1.0f;
+    float r = landscape ? aspect : 1.0f / aspect;     /* long/short ratio (>= 1) */
+    float avail = 2.0f - 2.0f * margin;               /* usable length along long edge */
+    /* button extent along the strip: nominal square size, capped to fit the strip */
+    float along  = fminf(2.0f * f / r, avail / (HUD_COUNT * (1.0f + gap_frac)));
+    float across = along * r;           /* equal pixel size on the short edge */
+    float gap = along * gap_frac;
+    float total = HUD_COUNT * along + (HUD_COUNT - 1) * gap;
+    if (landscape) {                    /* row across the bottom, centred in x */
+        float x = -total * 0.5f + (float)i * (along + gap);
+        *x0 = x;            *x1 = x + along;
+        *y0 = -1.0f + margin; *y1 = -1.0f + margin + across;
+    } else {                            /* column down the left, centred in y */
+        float t = total * 0.5f - (float)i * (along + gap);
+        *x0 = -1.0f + margin; *x1 = -1.0f + margin + across;
+        *y0 = t - along;      *y1 = t;
+    }
+}
+
+/* True if (px,py) in clip space [-1,1] (y up) lands on a button; out its action. */
+static bool hud_hit(float px, float py, float aspect, action* out)
+{
+    for (int i = 0; i < HUD_COUNT; i++) {
+        float x0, y0, x1, y1;
+        hud_button_rect(i, aspect, &x0, &y0, &x1, &y1);
+        if (px >= x0 && px <= x1 && py >= y0 && py <= y1) {
+            *out = HUD_BUTTONS[i].act;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Append one position/uv/color quad (two triangles) to a vertex buffer. */
+static void hud_push_quad(float** w, float x0, float y0, float x1, float y1,
+                          float u0, float v0, float u1, float v1, const float col[4])
+{
+    const float q[6][4] = {  /* x, y, u, v per vertex */
+        {x0,y0,u0,v1},{x1,y0,u1,v1},{x1,y1,u1,v0},
+        {x0,y0,u0,v1},{x1,y1,u1,v0},{x0,y1,u0,v0},
+    };
+    for (int k = 0; k < 6; k++) {
+        *(*w)++ = q[k][0]; *(*w)++ = q[k][1]; *(*w)++ = q[k][2]; *(*w)++ = q[k][3];
+        *(*w)++ = col[0]; *(*w)++ = col[1]; *(*w)++ = col[2]; *(*w)++ = col[3];
+    }
+}
+
+/* Draw the HUD: solid button backgrounds first (active toggles highlighted),
+   then the glyphs sampled from the font atlas. `active[i]` lit toggles glow. */
+static void hud_draw(GLuint prog, GLint locUseTex, GLuint vao, GLuint vbo,
+                     GLuint fontTex, int pw, int ph, const bool active[])
+{
+    const int natlas = (int)(sizeof FONT_5x7 / sizeof FONT_5x7[0]);
+    const float aspect = ph > 0 ? (float)pw / (float)ph : 1.0f;
+    const float COL_BG[4]   = { 0.10f, 0.12f, 0.16f, 0.60f };
+    const float COL_ON[4]   = { 0.20f, 0.52f, 0.90f, 0.80f };
+    const float COL_TEXT[4] = { 0.92f, 0.95f, 1.00f, 1.00f };
+
+    /* up to HUD_COUNT background + HUD_COUNT glyph quads, 6 verts * 8 floats. */
+    static float buf[HUD_COUNT * 2 * 6 * 8];
+    float* w = buf;
+    for (int i = 0; i < HUD_COUNT; i++) {          /* backgrounds */
+        float x0, y0, x1, y1;
+        hud_button_rect(i, aspect, &x0, &y0, &x1, &y1);
+        hud_push_quad(&w, x0, y0, x1, y1, 0, 0, 0, 0, active[i] ? COL_ON : COL_BG);
+    }
+    const int bgFloats = (int)(w - buf);
+    for (int i = 0; i < HUD_COUNT; i++) {          /* glyphs, centred in button */
+        float x0, y0, x1, y1;
+        hud_button_rect(i, aspect, &x0, &y0, &x1, &y1);
+        float gh = (y1 - y0) * 0.55f;              /* glyph height in clip space */
+        float gw = gh * ((float)FONT_GLYPH_W / FONT_GLYPH_H) / aspect; /* keep 5:7 */
+        float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+        int gi = font_index(HUD_BUTTONS[i].glyph);
+        /* Inset by half a texel so GL_NEAREST never bleeds the neighbouring cell. */
+        float tw = 1.0f / (natlas * FONT_GLYPH_W), th = 1.0f / FONT_GLYPH_H;
+        float u0 = gi * FONT_GLYPH_W * tw + tw * 0.5f;
+        float u1 = (gi * FONT_GLYPH_W + FONT_GLYPH_W) * tw - tw * 0.5f;
+        hud_push_quad(&w, cx - gw*0.5f, cy - gh*0.5f, cx + gw*0.5f, cy + gh*0.5f,
+                      u0, th * 0.5f, u1, 1.0f - th * 0.5f, COL_TEXT);
+    }
+    const int total = (int)(w - buf);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, total * (GLsizeiptr)sizeof(float), buf, GL_STREAM_DRAW);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glViewport(0, 0, pw, ph);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, fontTex);
+
+    glUniform1i(locUseTex, 0);                     /* backgrounds */
+    glDrawArrays(GL_TRIANGLES, 0, bgFloats / 8);
+    glUniform1i(locUseTex, 1);                     /* glyphs */
+    glDrawArrays(GL_TRIANGLES, bgFloats / 8, (total - bgFloats) / 8);
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc; (void)argv;
@@ -790,6 +1058,36 @@ int main(int argc, char* argv[])
     float fpos[2][2] = {{0,0},{0,0}};
     int   nfingers = 0;
     float last_pinch = 0.0f;
+
+    /* Route keyboard and on-screen HUD taps through one dispatcher. */
+    const controls ctl = {
+        .window = window, .running = &running, .rotate = &rotate,
+        .wireframe = &wireframe, .lightIsPoint = &lightIsPoint, .cull = &cull,
+        .ambient = &ambient, .mi = &mi, .distance = &distance,
+        .orient_index = orient_index, .mradius = mradius,
+        .model_paths = model_paths, .num_models = NUM_MODELS, .fovy = fovy,
+    };
+
+    /* 2D HUD: shader, dynamic vertex buffer, and baked font atlas. */
+    GLuint hudProg = link_program(HUD_VERTEX_SRC, HUD_FRAGMENT_SRC);
+    if (!hudProg) return 1;
+    GLint hudUseTex = glGetUniformLocation(hudProg, "uUseTex");
+    glUseProgram(hudProg);
+    glUniform1i(glGetUniformLocation(hudProg, "uFont"), 0);
+    GLuint hudVao = 0, hudVbo = 0;
+    glGenVertexArrays(1, &hudVao);
+    glBindVertexArray(hudVao);
+    glGenBuffers(1, &hudVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, hudVbo);
+    glEnableVertexAttribArray(0); /* pos   */
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8*sizeof(float), (const void*)0);
+    glEnableVertexAttribArray(1); /* uv    */
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8*sizeof(float), (const void*)(2*sizeof(float)));
+    glEnableVertexAttribArray(2); /* color */
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float), (const void*)(4*sizeof(float)));
+    glBindVertexArray(0);
+    GLuint hudFont = hud_font_texture();
+
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -800,36 +1098,46 @@ int main(int argc, char* argv[])
 
             case SDL_EVENT_KEY_DOWN:
                 switch (e.key.key) {
-                case SDLK_ESCAPE: running = false; break;
-                case SDLK_SPACE:  rotate = !rotate; break;
-                case SDLK_RETURN:
-                    mi = (mi + 1) % NUM_MODELS;
-                    distance = mradius[mi] / sinf(fovy * 0.5f) * 1.2f;
-                    SDL_Log("model %d: %s", mi, model_paths[mi]);
-                    break;
-                case SDLK_W:      wireframe = !wireframe; break;
-                case SDLK_L:      lightIsPoint = !lightIsPoint;
-                    SDL_Log("light: %s", lightIsPoint ? "point source" : "directional sun"); break;
-                case SDLK_C:      cull = !cull;
-                    SDL_Log("backface culling: %s", cull ? "on" : "off"); break;
+                case SDLK_ESCAPE: apply_action(&ctl, ACT_QUIT); break;
+                case SDLK_SPACE:  apply_action(&ctl, ACT_ROTATE); break;
+                case SDLK_RETURN: apply_action(&ctl, ACT_NEXT_MODEL); break;
+                case SDLK_W:      apply_action(&ctl, ACT_WIREFRAME); break;
+                case SDLK_L:      apply_action(&ctl, ACT_LIGHT); break;
+                case SDLK_C:      apply_action(&ctl, ACT_CULL); break;
                 case SDLK_UP:           /* arrows work on every keyboard layout */
-                case SDLK_RIGHTBRACKET: ambient = fminf(1.0f, ambient + 0.05f);
-                    SDL_Log("ambient: %.2f", ambient); break;
+                case SDLK_RIGHTBRACKET: apply_action(&ctl, ACT_AMBIENT_UP); break;
                 case SDLK_DOWN:
-                case SDLK_LEFTBRACKET:  ambient = fmaxf(0.0f, ambient - 0.05f);
-                    SDL_Log("ambient: %.2f", ambient); break;
-                case SDLK_O:
-                    orient_index[mi] = (orient_index[mi] + 1) % ORIENT_COUNT;
-                    SDL_Log("model %d orientation preset %d/%d", mi,
-                            orient_index[mi], ORIENT_COUNT - 1);
-                    break;
+                case SDLK_LEFTBRACKET:  apply_action(&ctl, ACT_AMBIENT_DOWN); break;
+                case SDLK_O:      apply_action(&ctl, ACT_ORIENT); break;
                 default: break;
                 }
                 break;
 
+            /* No text field yet, so consume IME text without using it (the 'K'
+               HUD button toggles the soft keyboard for future text entry). */
+            case SDL_EVENT_TEXT_INPUT:
+                break;
+
             /* ---- mouse: left-drag orbits, wheel zooms ---- */
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (e.button.button == SDL_BUTTON_LEFT) dragging = true;
+                /* SDL emulates a mouse event for every touch, so on a touchscreen
+                   a single tap arrives twice (real FINGER + synthetic MOUSE) and
+                   would fire each HUD action twice (model index would jump by 2,
+                   toggles would cancel out). Drop the touch-synthesized copy and
+                   let SDL_EVENT_FINGER_DOWN handle the tap. */
+                if (e.button.which == SDL_TOUCH_MOUSEID) break;
+                if (e.button.button == SDL_BUTTON_LEFT) {
+                    /* A tap on a HUD button fires its action instead of orbiting. */
+                    int lw = 1, lh = 1;
+                    SDL_GetWindowSize(window, &lw, &lh);
+                    float nx = e.button.x / (float)lw * 2.0f - 1.0f;
+                    float ny = 1.0f - e.button.y / (float)lh * 2.0f;
+                    action act;
+                    if (hud_hit(nx, ny, (float)lw / (float)lh, &act))
+                        apply_action(&ctl, act);
+                    else
+                        dragging = true;
+                }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
                 if (e.button.button == SDL_BUTTON_LEFT) dragging = false;
@@ -845,7 +1153,20 @@ int main(int argc, char* argv[])
                 break;
 
             /* ---- touch: one finger orbits, two fingers pinch-zoom ---- */
-            case SDL_EVENT_FINGER_DOWN:
+            case SDL_EVENT_FINGER_DOWN: {
+                /* Mirror of the guard above: ignore touch events SDL synthesizes
+                   from a real mouse, so a desktop click isn't also counted here. */
+                if (e.tfinger.touchID == SDL_MOUSE_TOUCHID) break;
+                /* A tap on a HUD button fires its action and is not tracked as an
+                   orbit finger (so it neither orbits nor counts toward pinch). */
+                int lw = 1, lh = 1;
+                SDL_GetWindowSize(window, &lw, &lh);
+                action act;
+                if (hud_hit(e.tfinger.x * 2.0f - 1.0f, 1.0f - e.tfinger.y * 2.0f,
+                            (float)lw / (float)lh, &act)) {
+                    apply_action(&ctl, act);
+                    break;
+                }
                 if (nfingers < 2) {
                     int s = (nfingers == 0) ? 0 : 1;
                     fid[s] = e.tfinger.fingerID;
@@ -857,6 +1178,7 @@ int main(int argc, char* argv[])
                     }
                 }
                 break;
+            }
             case SDL_EVENT_FINGER_UP:
                 for (int s = 0; s < 2; s++)
                     if (nfingers && fid[s] == e.tfinger.fingerID) {
@@ -865,10 +1187,15 @@ int main(int argc, char* argv[])
                         break;
                     }
                 break;
-            case SDL_EVENT_FINGER_MOTION:
+            case SDL_EVENT_FINGER_MOTION: {
+                bool tracked = false;
                 for (int s = 0; s < 2; s++)
-                    if (fid[s] == e.tfinger.fingerID) { fpos[s][0]=e.tfinger.x; fpos[s][1]=e.tfinger.y; }
-                if (nfingers == 1) {
+                    if (fid[s] == e.tfinger.fingerID) {
+                        fpos[s][0]=e.tfinger.x; fpos[s][1]=e.tfinger.y; tracked = true;
+                    }
+                /* A finger that landed on a HUD button isn't tracked, so its drag
+                   never orbits even while another finger is down. */
+                if (nfingers == 1 && tracked) {
                     yaw   -= e.tfinger.dx * TOUCH_SENS;
                     pitch += e.tfinger.dy * TOUCH_SENS;
                 } else if (nfingers == 2) {
@@ -878,6 +1205,7 @@ int main(int argc, char* argv[])
                     last_pinch = pinch;
                 }
                 break;
+            }
 
             default: break;
             }
@@ -1087,12 +1415,30 @@ int main(int argc, char* argv[])
             glDisable(GL_SCISSOR_TEST);
         }
 
+        /* ---- on-screen control buttons (drawn last, over everything) ---- */
+        bool active[HUD_COUNT];
+        for (int i = 0; i < HUD_COUNT; i++) {
+            switch (HUD_BUTTONS[i].act) {
+            case ACT_ROTATE:    active[i] = rotate; break;
+            case ACT_WIREFRAME: active[i] = wireframe; break;
+            case ACT_LIGHT:     active[i] = lightIsPoint; break;
+            case ACT_CULL:      active[i] = cull; break;
+            case ACT_TEXTINPUT: active[i] = SDL_TextInputActive(window); break;
+            default:            active[i] = false; break;
+            }
+        }
+        hud_draw(hudProg, hudUseTex, hudVao, hudVbo, hudFont, pw, ph, active);
+
         SDL_GL_SwapWindow(window);
         SDL_Delay(16);
     }
 
     for (int i = 0; i < NUM_MODELS; i++) { free(models[i].material_tex); obj_free(&models[i].mesh); }
     free(gizmo.material_tex); obj_free(&gizmo.mesh);
+    glDeleteTextures(1, &hudFont);
+    glDeleteBuffers(1, &hudVbo);
+    glDeleteVertexArrays(1, &hudVao);
+    glDeleteProgram(hudProg);
     texcache_free();   /* glDeleteTextures on every cached image */
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(window);
