@@ -112,7 +112,10 @@ static const char* FRAGMENT_SRC =
     "uniform float uOpacity;\n"
     "uniform int  uHasTexture;\n"   /* reserved; textures arrive in the next slice */
     "uniform sampler2D uTex;\n"
-    "uniform vec3 uLightDir;\n"     /* key light direction (world) */
+    "uniform vec3 uLightDir;\n"     /* directional key: surface->light (world) */
+    "uniform vec3 uLightPos;\n"     /* point key: light position (world) */
+    "uniform int  uLightIsPoint;\n" /* 0 = directional sun, 1 = positioned source */
+    "uniform float uLightRefDist;\n"/* point-light brightness reference distance */
     "uniform sampler2D uShadowMap;\n"
     "in vec4 vLightPos;\n"
     "out vec4 fragColor;\n"
@@ -144,9 +147,22 @@ static const char* FRAGMENT_SRC =
     "    // - a rotating light/dark seam along the triangulation diagonal.\n"
     "    if (!gl_FrontFacing) N = -N;\n"
     "    vec3 albedo = (uHasTexture == 1) ? texture(uTex, vUV).rgb * uKd : uKd;\n"
-    "    // one directional key light (Blinn-Phong) with self-shadowing, plus a\n"
-    "    // flat ambient fill so shadowed areas stay readable.\n"
-    "    vec3 L = normalize(uLightDir);\n"
+    "    // one key light (Blinn-Phong) with self-shadowing, plus a flat ambient\n"
+    "    // fill so shadowed areas stay readable. The light is either a distant\n"
+    "    // sun (parallel rays, uLightDir) or a positioned source (uLightPos):\n"
+    "    // a point source gives L per-fragment plus inverse-square falloff, so\n"
+    "    // the near side reads brighter than the far side.\n"
+    "    vec3 L;\n"
+    "    float atten = 1.0;\n"
+    "    if (uLightIsPoint == 1) {\n"
+    "        vec3 toLight = uLightPos - vWorldPos;\n"
+    "        float dist = max(length(toLight), 1e-4);\n"
+    "        L = toLight / dist;\n"
+    "        // normalized so brightness ~= the sun's at the framing distance\n"
+    "        atten = clamp((uLightRefDist * uLightRefDist) / (dist * dist), 0.0, 4.0);\n"
+    "    } else {\n"
+    "        L = normalize(uLightDir);\n"
+    "    }\n"
     "    vec3 H = normalize(L + V);\n"
     "    float diff = max(dot(N, L), 0.0);\n"
     "    float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), max(uNs, 1.0)) : 0.0;\n"
@@ -313,6 +329,7 @@ typedef struct {
     GLint mvp, model, normalMat, viewPos, ambient;
     GLint kd, ks, ns, opacity, hasTexture, tex;
     GLint lightSpace, lightDir, shadowMap;
+    GLint lightPos, lightIsPoint, lightRefDist;
 } uniforms;
 
 static void cache_uniforms(GLuint p, uniforms* u)
@@ -330,6 +347,9 @@ static void cache_uniforms(GLuint p, uniforms* u)
     u->tex        = glGetUniformLocation(p, "uTex");
     u->lightSpace = glGetUniformLocation(p, "uLightSpace");
     u->lightDir   = glGetUniformLocation(p, "uLightDir");
+    u->lightPos   = glGetUniformLocation(p, "uLightPos");
+    u->lightIsPoint = glGetUniformLocation(p, "uLightIsPoint");
+    u->lightRefDist = glGetUniformLocation(p, "uLightRefDist");
     u->shadowMap  = glGetUniformLocation(p, "uShadowMap");
 }
 
@@ -529,6 +549,7 @@ int main(int argc, char* argv[])
     bool running   = true;
     bool rotate    = true;
     bool wireframe = false;
+    bool lightIsPoint = false; /* 'L' toggles distant sun <-> positioned source */
     float ambient  = 0.40f;    /* flat ambient fill; '[' / ']' adjust at runtime */
     bool cull      = false;    /* double-sided by default: these OBJs come from
                                   different exporters with inconsistent winding,
@@ -562,6 +583,8 @@ int main(int argc, char* argv[])
                     SDL_Log("model %d: %s", mi, model_paths[mi]);
                     break;
                 case SDLK_W:      wireframe = !wireframe; break;
+                case SDLK_L:      lightIsPoint = !lightIsPoint;
+                    SDL_Log("light: %s", lightIsPoint ? "point source" : "directional sun"); break;
                 case SDLK_C:      cull = !cull;
                     SDL_Log("backface culling: %s", cull ? "on" : "off"); break;
                 case SDLK_UP:           /* arrows work on every keyboard layout */
@@ -671,8 +694,15 @@ int main(int argc, char* argv[])
         if (fabsf(Ld[1]) > 0.99f) { lightUp[0]=0; lightUp[1]=0; lightUp[2]=1; }
         float orthoR = radius * 1.4f;
         mat4 lightView  = mat4_look_at(lightEye, center, lightUp);
-        mat4 lightProj  = mat4_ortho(-orthoR, orthoR, -orthoR, orthoR,
-                                     0.05f, orthoDist + radius*1.6f);
+        /* Directional: parallel rays -> orthographic shadow frustum. Point: rays
+           diverge from lightEye -> perspective frustum just wide enough to cover
+           the model's bounding sphere. shadow_factor() already does the perspective
+           divide, so the same lightSpace matrix serves both. */
+        mat4 lightProj  = lightIsPoint
+            ? mat4_perspective(2.0f * atan2f(orthoR, orthoDist), 1.0f,
+                               orthoDist - radius*1.6f, orthoDist + radius*1.6f)
+            : mat4_ortho(-orthoR, orthoR, -orthoR, orthoR,
+                         0.05f, orthoDist + radius*1.6f);
         mat4 lightSpace = mat4_mul(lightProj, lightView);
 
         /* clamp interactive camera params */
@@ -750,6 +780,9 @@ int main(int argc, char* argv[])
         glUniformMatrix4fv(u.lightSpace, 1, GL_FALSE, lightSpace.m);
         glUniform3fv(u.viewPos,  1, eye);
         glUniform3fv(u.lightDir, 1, keyDir);
+        glUniform3fv(u.lightPos, 1, lightEye);   /* source position = shadow eye */
+        glUniform1i(u.lightIsPoint, lightIsPoint ? 1 : 0);
+        glUniform1f(u.lightRefDist, orthoDist);
         glUniform3f(u.ambient, ambient, ambient, ambient);  /* flat ambient fill */
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, sm.tex);
@@ -813,6 +846,9 @@ int main(int argc, char* argv[])
             glUniformMatrix4fv(u.model,     1, GL_FALSE, gmodel.m);
             glUniformMatrix3fv(u.normalMat, 1, GL_FALSE, gnormal);
             glUniform3fv(u.viewPos, 1, geye);
+            glUniform1i(u.lightIsPoint, 0);  /* overlay: always directional, so the
+                                                main scene's point source (in a
+                                                different space) can't dim it */
             glUniform3f(u.ambient, 0.55f, 0.55f, 0.55f);  /* brighter so it reads */
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
             glDisable(GL_CULL_FACE);        /* thin glyphs: show both sides */
