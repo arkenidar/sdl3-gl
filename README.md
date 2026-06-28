@@ -205,11 +205,12 @@ git submodule update --init --depth 1 SDL    # first time
 ./gradlew assembleDebug                       # -> app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The app builds, installs and launches. One step remains before it's fully usable:
-asset loading must be routed through `SDL_IOStream`/`AAsset`. The current
-`asset_path()` walk-up and `obj_loader.h` use `fopen`, which doesn't see files
-packed inside an APK — the models are bundled correctly but not yet read on
-device. Details and the fix are in [android/README.md](android/README.md#-known-limitation-asset-loading).
+Asset loading is routed through `SDL_IOStream` (`SDL_LoadFile`/`SDL_IOFromFile`),
+so the same code reads the filesystem on desktop/Termux and the APK's
+`AAssetManager` on Android. The models are bundled at APK path `assets/<file>`
+and the loader resolves them there. Verified on the desktop GL/GLES builds;
+on-device run is documented but not yet exercised. Details in
+[android/README.md](android/README.md#asset-loading).
 
 ## Assets
 

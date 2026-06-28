@@ -61,26 +61,32 @@ adb logcat -s SDL SDL3GL                 # logs
 `x86_64` is included so it runs on the standard emulator; drop it from
 `abiFilters` in [app/build.gradle](app/build.gradle) for device-only builds.
 
-## ⚠️ Known limitation: asset loading
+## Asset loading
 
-The app **builds, installs and launches**, but **model loading does not work on
-device yet.** [obj_loader.h](../obj_loader.h) and `asset_path()` in
-[sdl3-glsl.c](../sdl3-glsl.c) read files with `fopen()`/`fgets()`, which cannot
-see files packed inside the APK — they're served by Android's `AAssetManager`,
-not the filesystem. The models are bundled correctly (`assets/assets/*` in the
-APK); only the *reading* side needs changing.
+Asset I/O goes through `SDL_IOStream`, so one code path serves desktop and
+Android. `SDL_LoadFile`/`SDL_IOFromFile` read the filesystem on desktop/Termux
+and the APK's `AAssetManager` on Android, where the assets have no filesystem
+path. Specifically:
 
-**The fix (next step):** route file reads through `SDL_IOStream`. On Android
-`SDL_IOFromFile("assets/head.obj", "rb")` resolves relative paths against the
-APK's asset manager automatically, and on desktop it reads the filesystem — so
-one code path serves both. Concretely:
+- `asset_path()` in [sdl3-glsl.c](../sdl3-glsl.c) probes the relative
+  `"assets/..."` path with `SDL_IOFromFile` first (this is what hits the APK
+  asset manager on Android); on desktop it falls back to walking up from
+  `SDL_GetBasePath()` so a build run from `build/` still finds `assets/`.
+- [obj_loader.h](../obj_loader.h) loads each `.obj`/`.mtl` whole via
+  `SDL_LoadFile` and parses it from memory.
+- `load_texture()` reads the image with `SDL_LoadFile` and decodes it with
+  `stbi_load_from_memory`.
 
-1. Replace `fopen`/`fgets`/`fread`/`fclose` in `obj_loader.h` with
-   `SDL_IOFromFile` / `SDL_ReadIO` (or load whole-file via `SDL_LoadFile_IO`
-   then parse from memory).
-2. On Android, skip the `SDL_GetBasePath()` walk-up in `asset_path()` and pass
-   the relative `"assets/..."` path straight to `SDL_IOFromFile`.
-3. Decode textures from the in-memory buffer (`stbi_load_from_memory`) instead
-   of `stbi_load` on a path.
+The assets are bundled at APK path `assets/<file>` (via the
+`app/src/main/assets/assets` symlink), matching the `"assets/..."` prefixes the
+code passes to the loader.
 
-This is the same desktop C/GLSL code; only its I/O layer changes.
+**Verified on desktop** (GL and GLES configs load all models/textures). The
+on-device APK build is confirmed; running it on a physical device or emulator
+has not yet been exercised here (no device/AVD was attached). To check:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n org.sdl3gl/.MainActivity
+adb logcat -s SDL3GL SDL   # expect "model N: ..." and "texture loaded: ..." lines
+```

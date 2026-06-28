@@ -44,6 +44,11 @@
 #include <string.h>
 #include <math.h>
 
+/* Files are read through SDL_IOStream (SDL_LoadFile) rather than stdio, so the
+   same code reads the filesystem on desktop/Termux and the APK asset manager on
+   Android, where the assets have no filesystem path. */
+#include <SDL3/SDL.h>
+
 #define OBJ_FLOATS_NORMAL_POSITION 6   /* normal.xyz + position.xyz      */
 #define OBJ_FLOATS_TEXCOORD        2   /* optional trailing texcoord.uv  */
 #define OBJ_MAX_NAME               128
@@ -154,6 +159,26 @@ static bool obj_kw(const char* s, const char* kw)
     return strncmp(s, kw, n) == 0 && (s[n] == ' ' || s[n] == '\t');
 }
 
+/* fgets() over an in-memory buffer. Copies the next line (including its
+   trailing newline, like fgets) from [*cur, end) into `buf`, advances `*cur`,
+   and returns `buf`; returns NULL once the cursor reaches `end`. Lets the line
+   parsers below stay exactly as they were while the bytes come from a buffer
+   loaded with SDL_LoadFile instead of a FILE*. */
+static char* obj_mem_gets(char* buf, int cap, const char** cur, const char* end)
+{
+    const char* p = *cur;
+    if (p >= end) return NULL;
+    int n = 0;
+    while (p < end && n < cap - 1) {
+        char c = *p++;
+        buf[n++] = c;
+        if (c == '\n') break;
+    }
+    buf[n] = '\0';
+    *cur = p;
+    return buf;
+}
+
 /* ---- internal: face-corner parsing ---------------------------------- *
  * Parse one corner ("p", "p/t", "p//n", "p/t/n"): stores the (1-based or
  * negative/relative) position, texcoord and normal indices; a missing
@@ -232,11 +257,15 @@ static int obj_find_material(const obj_material* mats, size_t count, const char*
 static bool obj_load_mtl(const char* mtl_path, obj_material** mats,
                          size_t* count, size_t* cap)
 {
-    FILE* f = fopen(mtl_path, "r");
-    if (!f) {
-        fprintf(stderr, "obj_load: cannot open material library '%s'\n", mtl_path);
+    size_t size = 0;
+    char* file = (char*)SDL_LoadFile(mtl_path, &size);
+    if (!file) {
+        fprintf(stderr, "obj_load: cannot open material library '%s' (%s)\n",
+                mtl_path, SDL_GetError());
         return false;
     }
+    const char* rp  = file;
+    const char* rend = file + size;
 
     char mtl_dir[OBJ_PATH_MAX];
     obj_dirname(mtl_path, mtl_dir, sizeof mtl_dir);
@@ -245,7 +274,7 @@ static bool obj_load_mtl(const char* mtl_path, obj_material** mats,
     obj_material* cur = NULL;
     bool ok = true;
 
-    while (ok && fgets(line, sizeof line, f)) {
+    while (ok && obj_mem_gets(line, sizeof line, &rp, rend)) {
         const char* s = line;
         while (*s == ' ' || *s == '\t') s++;
 
@@ -270,7 +299,7 @@ static bool obj_load_mtl(const char* mtl_path, obj_material** mats,
         }
     }
 
-    fclose(f);
+    SDL_free(file);
     return ok;
 }
 
@@ -302,11 +331,14 @@ static bool obj_load(const char* path, obj_mesh* out)
     memset(out, 0, sizeof *out);
     out->floats_per_vertex = OBJ_FLOATS_NORMAL_POSITION;
 
-    FILE* f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "obj_load: cannot open '%s'\n", path);
+    size_t size = 0;
+    char* file = (char*)SDL_LoadFile(path, &size);
+    if (!file) {
+        fprintf(stderr, "obj_load: cannot open '%s' (%s)\n", path, SDL_GetError());
         return false;
     }
+    const char* rp   = file;
+    const char* rend = file + size;
 
     char obj_dir[OBJ_PATH_MAX];
     obj_dirname(path, obj_dir, sizeof obj_dir);
@@ -324,7 +356,7 @@ static bool obj_load(const char* path, obj_mesh* out)
     int  current_material = -1;     /* set by usemtl                      */
     size_t cur_sub = (size_t)-1;    /* active submesh index, or none      */
 
-    while (ok && fgets(line, sizeof line, f)) {
+    while (ok && obj_mem_gets(line, sizeof line, &rp, rend)) {
         if (line[0] == 'v' && line[1] == ' ') {
             float x, y, z;
             if (sscanf(line + 2, "%f %f %f", &x, &y, &z) == 3)
@@ -446,7 +478,7 @@ static bool obj_load(const char* path, obj_mesh* out)
         /* All other lines (#, o, s, ...) are ignored. */
     }
 
-    fclose(f);
+    SDL_free(file);
     free(pos.data);
     free(nrm.data);
     free(tex.data);

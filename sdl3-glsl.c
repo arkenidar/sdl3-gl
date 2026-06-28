@@ -52,18 +52,39 @@
  * executable's directory until the requested relative path is found, so
  * the program runs from any working directory.
  * ------------------------------------------------------------------ */
+/* True if SDL can open `p` for reading. On Android this consults the APK asset
+   manager; elsewhere it hits the filesystem. */
+static bool asset_exists(const char* p)
+{
+    SDL_IOStream* io = SDL_IOFromFile(p, "rb");
+    if (!io) return false;
+    SDL_CloseIO(io);
+    return true;
+}
+
 static const char* asset_path(const char* relative)
 {
     static char path[1024];
-    char dir[1024];
 
+    /* Try the relative path as-is first. On Android SDL_IOFromFile resolves it
+       against the APK's asset manager (the assets have no filesystem path);
+       elsewhere it resolves against the current working directory. The string
+       returned here is later handed to SDL_LoadFile, which resolves it the same
+       way, so a relative result stays valid on Android. */
+    if (asset_exists(relative)) {
+        snprintf(path, sizeof(path), "%s", relative);
+        return path;
+    }
+
+    /* Desktop fallback: walk up from the executable's directory so a build run
+       from build/ still finds the project's assets/ next to the source tree. */
+    char dir[1024];
     const char* base = SDL_GetBasePath(); /* SDL3: do not free */
     snprintf(dir, sizeof(dir), "%s", base ? base : "./");
 
     for (int level = 0; level < 16; level++) {
         snprintf(path, sizeof(path), "%s%s", dir, relative);
-        FILE* f = fopen(path, "r");
-        if (f) { fclose(f); return path; }
+        if (asset_exists(path)) return path;
 
         size_t len = strlen(dir);
         if (len && (dir[len-1] == '/' || dir[len-1] == '\\')) dir[--len] = '\0';
@@ -376,9 +397,20 @@ static GLuint load_texture(const char* path)
     for (int i = 0; i < g_texcache_count; i++)
         if (strcmp(g_texcache[i].path, path) == 0) return g_texcache[i].tex;
 
+    /* Read the encoded image through SDL_IOStream (APK asset manager on Android,
+       filesystem elsewhere), then decode from memory rather than from a path. */
+    size_t size = 0;
+    void* filedata = SDL_LoadFile(path, &size);
+    if (!filedata) {
+        SDL_Log("texture load failed: %s (%s)", path, SDL_GetError());
+        return texcache_remember(path, 0);        /* cache the miss */
+    }
+
     int w, h, n;
     stbi_set_flip_vertically_on_load(1);          /* OBJ UV origin is bottom-left */
-    unsigned char* data = stbi_load(path, &w, &h, &n, 4);
+    unsigned char* data = stbi_load_from_memory((const stbi_uc*)filedata,
+                                                (int)size, &w, &h, &n, 4);
+    SDL_free(filedata);
     if (!data) {
         SDL_Log("texture load failed: %s (%s)", path, stbi_failure_reason());
         return texcache_remember(path, 0);        /* cache the miss */
