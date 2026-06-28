@@ -8,6 +8,11 @@ A companion **modern renderer** — `sdl3-glsl`, core-profile **OpenGL 3.3 + GLS
 with shaders, VAOs/VBOs, textures and shadow mapping — is built alongside it.
 See [Modern renderer (`sdl3-glsl`)](#modern-renderer-sdl3-glsl).
 
+📱 **Android:** the modern renderer also ships as an APK (OpenGL ES 3.0, with an
+on-screen control overlay for touch). Install it on a device from
+**http://arkenidar.com/android/apk-files/sdl3-gl.apk** — see
+[android/](android/) for the build.
+
 ## Features
 
 - Window + OpenGL context creation via SDL3
