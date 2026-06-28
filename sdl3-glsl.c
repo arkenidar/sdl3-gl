@@ -106,11 +106,12 @@ static const char* FRAGMENT_SRC =
     "in vec2 vUV;\n"
     "uniform vec3 uViewPos;\n"
     "uniform vec3 uAmbient;\n"
+    "uniform vec3 uKa;\n"           /* material ambient (MTL Ka), tints the fill */
     "uniform vec3 uKd;\n"
     "uniform vec3 uKs;\n"
     "uniform float uNs;\n"
     "uniform float uOpacity;\n"
-    "uniform int  uHasTexture;\n"   /* reserved; textures arrive in the next slice */
+    "uniform int  uHasTexture;\n"   /* 1 when uTex carries this material's map_Kd */
     "uniform sampler2D uTex;\n"
     "uniform vec3 uLightDir;\n"     /* directional key: surface->light (world) */
     "uniform vec3 uLightPos;\n"     /* point key: light position (world) */
@@ -119,6 +120,14 @@ static const char* FRAGMENT_SRC =
     "uniform sampler2D uShadowMap;\n"
     "in vec4 vLightPos;\n"
     "out vec4 fragColor;\n"
+    "\n"
+    "// Gamma helpers. The diffuse map is uploaded as an sRGB texture, so the\n"
+    "// sampler returns linear values already; the MTL Ka/Kd/Ks colours are\n"
+    "// authored in sRGB though, so we linearize them before lighting and encode\n"
+    "// the final colour back to sRGB on output. Doing the lighting math in\n"
+    "// linear space is what makes textured surfaces read at the right brightness.\n"
+    "vec3 srgb2lin(vec3 c){ return pow(max(c, 0.0), vec3(2.2)); }\n"
+    "vec3 lin2srgb(vec3 c){ return pow(max(c, 0.0), vec3(1.0/2.2)); }\n"
     "\n"
     "// Fraction of the key light reaching this fragment (1 = lit, 0 = shadow),\n"
     "// from a 3x3 PCF lookup with a slope-scaled depth bias to avoid acne.\n"
@@ -149,7 +158,10 @@ static const char* FRAGMENT_SRC =
     "    // to -1 (back) over a narrow band, and fold it into the light term. It is\n"
     "    // continuous in N and V, so neither bent nor smoothed faces can split.\n"
     "    float o = clamp(dot(N, V) * 8.0, -1.0, 1.0);\n"
-    "    vec3 albedo = (uHasTexture == 1) ? texture(uTex, vUV).rgb * uKd : uKd;\n"
+    "    vec3 kd = srgb2lin(uKd);\n"        /* sampler gives linear texels; Kd is sRGB */
+    "    vec3 ks = srgb2lin(uKs);\n"
+    "    vec3 ka = srgb2lin(uKa);\n"
+    "    vec3 albedo = (uHasTexture == 1) ? texture(uTex, vUV).rgb * kd : kd;\n"
     "    // one key light (Blinn-Phong) with self-shadowing, plus a flat ambient\n"
     "    // fill so shadowed areas stay readable. The light is either a distant\n"
     "    // sun (parallel rays, uLightDir) or a positioned source (uLightPos):\n"
@@ -180,14 +192,14 @@ static const char* FRAGMENT_SRC =
     "    float diff = wrap * wrap * atten;\n"
     "    float spec = (ndl > 0.0) ? pow(max(ndh, 0.0), max(uNs, 1.0)) * atten : 0.0;\n"
     "    float sh = shadow_factor(N, L);\n"
-    "    vec3 color = uAmbient * albedo + sh * (albedo * diff + uKs * spec);\n"
+    "    vec3 color = uAmbient * ka * albedo + sh * (albedo * diff + ks * spec);\n"
     "    // Make transparent surfaces (glass) read: a small visibility floor,\n"
     "    // plus Fresnel (opaque at grazing angles) and specular highlights.\n"
     "    // Opaque materials (uOpacity = 1) clamp back to fully opaque.\n"
     "    float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
     "    float base = (uOpacity < 0.999) ? max(uOpacity, 0.18) : 1.0;\n"
     "    float alpha = clamp(base + fres + 0.5 * spec, 0.0, 1.0);\n"
-    "    fragColor = vec4(color, alpha);\n"
+    "    fragColor = vec4(lin2srgb(color), alpha);\n"
     "}\n";
 
 static GLuint compile_shader(GLenum type, const char* src)
@@ -268,11 +280,58 @@ static bool gpu_model_upload(gpu_model* g)
     return true;
 }
 
+/* Anisotropic filtering token (core in 4.6, otherwise EXT_texture_filter_
+   anisotropic). Defined here so we can use it without a 4.6 GL header. */
+#ifndef GL_TEXTURE_MAX_ANISOTROPY
+#define GL_TEXTURE_MAX_ANISOTROPY     0x84FE
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY 0x84FF
+#endif
+
+/* True if the named GL extension is advertised (core-profile safe: uses the
+   indexed glGetStringi query, not the removed monolithic GL_EXTENSIONS string). */
+static bool gl_has_extension(const char* name)
+{
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; i++) {
+        const char* e = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && strcmp(e, name) == 0) return true;
+    }
+    return false;
+}
+
+/* Largest supported anisotropy (1 = unsupported/disabled), probed once. */
+static float texture_max_anisotropy(void)
+{
+    static int probed = 0;
+    static float maxa = 1.0f;
+    if (!probed) {
+        if (gl_has_extension("GL_EXT_texture_filter_anisotropic"))
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxa);
+        if (maxa < 1.0f) maxa = 1.0f;
+        probed = 1;
+    }
+    return maxa;
+}
+
 /* Decode an image (stb_image) and upload it as a 2D texture, caching by path so
-   an image shared by several materials/models loads once. Returns 0 on miss. */
+   an image shared by several materials/models loads once. Returns 0 on miss; a
+   failed decode is cached as 0 too, so a broken path isn't retried per model. */
 typedef struct { char path[OBJ_PATH_MAX]; GLuint tex; } tex_cache_entry;
 static tex_cache_entry g_texcache[256];
 static int g_texcache_count = 0;
+
+static GLuint texcache_remember(const char* path, GLuint tex)
+{
+    if (g_texcache_count < 256) {
+        snprintf(g_texcache[g_texcache_count].path, OBJ_PATH_MAX, "%s", path);
+        g_texcache[g_texcache_count].tex = tex;
+        g_texcache_count++;
+    }
+    return tex;
+}
 
 static GLuint load_texture(const char* path)
 {
@@ -283,26 +342,38 @@ static GLuint load_texture(const char* path)
     int w, h, n;
     stbi_set_flip_vertically_on_load(1);          /* OBJ UV origin is bottom-left */
     unsigned char* data = stbi_load(path, &w, &h, &n, 4);
-    if (!data) { SDL_Log("texture load failed: %s (%s)", path, stbi_failure_reason()); return 0; }
+    if (!data) {
+        SDL_Log("texture load failed: %s (%s)", path, stbi_failure_reason());
+        return texcache_remember(path, 0);        /* cache the miss */
+    }
 
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    /* Diffuse maps are sRGB-encoded: upload as sRGB so the sampler returns
+       linear values and the shader's lighting math is gamma-correct. */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    float maxa = texture_max_anisotropy();        /* sharpen at grazing angles */
+    if (maxa > 1.0f)
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, maxa < 8.0f ? maxa : 8.0f);
     stbi_image_free(data);
 
-    if (g_texcache_count < 256) {
-        snprintf(g_texcache[g_texcache_count].path, OBJ_PATH_MAX, "%s", path);
-        g_texcache[g_texcache_count].tex = tex;
-        g_texcache_count++;
-    }
     SDL_Log("texture loaded: %s (%dx%d)", path, w, h);
-    return tex;
+    return texcache_remember(path, tex);
+}
+
+/* Delete every cached GL texture and reset the cache. Call before tearing down
+   the GL context. */
+static void texcache_free(void)
+{
+    for (int i = 0; i < g_texcache_count; i++)
+        if (g_texcache[i].tex) glDeleteTextures(1, &g_texcache[i].tex);
+    g_texcache_count = 0;
 }
 
 /* Resolve each material's map_Kd into a GL texture for this model. */
@@ -340,7 +411,7 @@ static void model_bounds(const obj_mesh* m, float center[3], float* radius)
 /* Uniform locations resolved once after linking. */
 typedef struct {
     GLint mvp, model, normalMat, viewPos, ambient;
-    GLint kd, ks, ns, opacity, hasTexture, tex;
+    GLint ka, kd, ks, ns, opacity, hasTexture, tex;
     GLint lightSpace, lightDir, shadowMap;
     GLint lightPos, lightIsPoint, lightRefDist;
 } uniforms;
@@ -352,6 +423,7 @@ static void cache_uniforms(GLuint p, uniforms* u)
     u->normalMat  = glGetUniformLocation(p, "uNormalMat");
     u->viewPos    = glGetUniformLocation(p, "uViewPos");
     u->ambient    = glGetUniformLocation(p, "uAmbient");
+    u->ka         = glGetUniformLocation(p, "uKa");
     u->kd         = glGetUniformLocation(p, "uKd");
     u->ks         = glGetUniformLocation(p, "uKs");
     u->ns         = glGetUniformLocation(p, "uNs");
@@ -371,16 +443,20 @@ static void cache_uniforms(GLuint p, uniforms* u)
 static void draw_submesh(const gpu_model* g, const uniforms* u, size_t i)
 {
     const obj_submesh* s = &g->mesh.submeshes[i];
-    float kd[3] = {0.8f,0.8f,0.8f}, ks[3] = {0.2f,0.2f,0.2f};
+    /* Default ka = white so a materialless submesh gets the plain ambient fill
+       (uAmbient * 1 * albedo), matching the pre-material look. */
+    float ka[3] = {1.0f,1.0f,1.0f}, kd[3] = {0.8f,0.8f,0.8f}, ks[3] = {0.2f,0.2f,0.2f};
     float ns = 32.0f, opacity = 1.0f;
     GLuint tex = 0;
     if (s->material >= 0) {
         const obj_material* mt = &g->mesh.materials[s->material];
+        memcpy(ka, mt->ambient,  sizeof ka);
         memcpy(kd, mt->diffuse,  sizeof kd);
         memcpy(ks, mt->specular, sizeof ks);
         ns = mt->shininess; opacity = mt->opacity;
         if (g->material_tex) tex = g->material_tex[s->material];
     }
+    glUniform3fv(u->ka, 1, ka);
     glUniform3fv(u->kd, 1, kd);
     glUniform3fv(u->ks, 1, ks);
     glUniform1f(u->ns, ns);
@@ -880,6 +956,7 @@ int main(int argc, char* argv[])
 
     for (int i = 0; i < NUM_MODELS; i++) { free(models[i].material_tex); obj_free(&models[i].mesh); }
     free(gizmo.material_tex); obj_free(&gizmo.mesh);
+    texcache_free();   /* glDeleteTextures on every cached image */
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(window);
     SDL_Quit();
