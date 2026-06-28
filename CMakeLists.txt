@@ -15,7 +15,13 @@ target_link_libraries(sdl3-gl PRIVATE SDL3::SDL3 OpenGL::GL OpenGL::GLU m)
 # GLES build (Android, or desktop with -DSDL3GLSL_USE_GLES=ON against Mesa
 # GLES) links the GLES library directly and skips GLAD. obj_loader.h loads
 # OBJ/MTL/texture bundles and mat4.h does the matrix math; no GLU either way.
-option(SDL3GLSL_USE_GLES "Build sdl3-glsl against OpenGL ES 3.0 instead of desktop GL" OFF)
+# Backend must be chosen explicitly — no default. This forces every fresh
+# configure to state the API in use rather than silently building desktop GL.
+if(NOT DEFINED SDL3GLSL_USE_GLES)
+    message(FATAL_ERROR
+        "SDL3GLSL_USE_GLES must be set explicitly: "
+        "-DSDL3GLSL_USE_GLES=ON (OpenGL ES 3.0) or -DSDL3GLSL_USE_GLES=OFF (desktop GL 3.3).")
+endif()
 if(SDL3GLSL_USE_GLES)
     add_executable(sdl3-glsl sdl3-glsl.c)              # no GLAD on the ES path
     target_include_directories(sdl3-glsl PRIVATE third_party)
