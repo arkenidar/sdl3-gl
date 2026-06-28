@@ -514,10 +514,10 @@ int main(int argc, char* argv[])
     /* Orbit camera; distance frames the current model's sphere in the fovy. */
     const float fovy = 30.0f * (float)M_PI / 180.0f;
     float distance = mradius[mi] / sinf(fovy * 0.5f) * 1.2f;
-    float yaw = 0.0f, pitch = 0.35f;
-    float spin = 0.0f;                 /* turntable angle: the MODEL rotates
-                                          under the fixed light (so shadows sweep
-                                          across the surface), not the camera */
+    float yaw = 0.0f, pitch = 0.35f;   /* auto-rotate orbits the camera (advances
+                                          yaw), so the model holds still under a
+                                          camera-anchored light and self-shadows
+                                          stay put instead of sweeping */
     int   orient_index = 1;            /* default Z-up -> Y-up correction */
 
     glEnable(GL_DEPTH_TEST);
@@ -658,24 +658,22 @@ int main(int argc, char* argv[])
         if (distance < DIST_MIN) distance = DIST_MIN;
         if (distance > DIST_MAX) distance = DIST_MAX;
 
-        /* auto-spin the MODEL (turntable about vertical), but not while the user
-           is actively dragging the camera. Spinning the geometry under the fixed
-           light - rather than orbiting the camera around a static model - is what
-           makes the shading and self-shadows sweep across the surface. */
+        /* auto-rotate by orbiting the CAMERA (advance yaw), but not while the
+           user is actively dragging. Circling the viewer around a static model -
+           rather than spinning the geometry under the light - keeps the light
+           (camera-anchored) and the surface in a fixed relative pose, so the
+           self-shadows hold still instead of sweeping. */
         if (rotate && !dragging && nfingers == 0) {
-            spin += 0.01f;
-            if (spin > 2.0f*(float)M_PI) spin -= 2.0f*(float)M_PI;
+            yaw += 0.01f;
+            if (yaw > 2.0f*(float)M_PI) yaw -= 2.0f*(float)M_PI;
         }
 
-        /* model = turntable spin * orientation correction, both about the model
-           centre; independent of the camera and shared by both passes. The
-           depth pass uses this same matrix, so the shadow map is rebuilt for the
-           spun pose every frame. */
-        mat4 spinM = mat4_rotate(spin, 0.0f, 1.0f, 0.0f);
+        /* model = orientation correction only, about the model centre; the
+           geometry itself never spins. Shared by both passes, so the depth pass
+           rebuilds the shadow map for the same static pose. */
         mat4 model = mat4_mul(mat4_translate(center[0], center[1], center[2]),
-                     mat4_mul(spinM,
                      mat4_mul(orientation_matrix(orient_index),
-                              mat4_translate(-center[0], -center[1], -center[2]))));
+                              mat4_translate(-center[0], -center[1], -center[2])));
         float normalMat[9];
         mat3_normal_from_mat4(model, normalMat);
 
@@ -777,13 +775,12 @@ int main(int argc, char* argv[])
             float gnear = gdist - gradius * 1.5f; if (gnear < 0.01f) gnear = 0.01f;
             mat4 gproj  = mat4_perspective(fovy, 1.0f, gnear, gdist + gradius * 3.0f);
             mat4 gview  = mat4_look_at(geye, gcenter, up);
-            /* same turntable spin + Z-up -> Y-up correction the scene model
-               uses, about the gizmo centre, so the labels track the model's
-               current pose. */
+            /* same Z-up -> Y-up correction the scene model uses, about the gizmo
+               centre. The model no longer spins, so the labels track the pose
+               purely through the shared yaw/pitch of geye. */
             mat4 gmodel = mat4_mul(mat4_translate(gcenter[0], gcenter[1], gcenter[2]),
-                          mat4_mul(spinM,
                           mat4_mul(orientation_matrix(orient_index),
-                                   mat4_translate(-gcenter[0], -gcenter[1], -gcenter[2]))));
+                                   mat4_translate(-gcenter[0], -gcenter[1], -gcenter[2])));
             mat4 gmvp   = mat4_mul(gproj, mat4_mul(gview, gmodel));
             float gnormal[9];
             mat3_normal_from_mat4(gmodel, gnormal);
