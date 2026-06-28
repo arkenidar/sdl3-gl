@@ -9,13 +9,23 @@ find_package(OpenGL REQUIRED)   # provides OpenGL::GL and OpenGL::GLU
 add_executable(sdl3-gl sdl3-gl.c)   # parse.h is #included by the .c
 target_link_libraries(sdl3-gl PRIVATE SDL3::SDL3 OpenGL::GL OpenGL::GLU m)
 
-# --- Modern renderer: core-profile 3.3 + GLSL (alongside the legacy app) ---
-# Uses GLAD (generated under glad/) to load GL entry points, obj_loader.h to
-# load OBJ/MTL/texture bundles, and mat4.h for matrix math. No GLU; GLAD
-# supplies all GL functions at runtime.
-add_executable(sdl3-glsl sdl3-glsl.c glad/src/gl.c)
-target_include_directories(sdl3-glsl PRIVATE glad/include third_party)
-target_link_libraries(sdl3-glsl PRIVATE SDL3::SDL3 OpenGL::GL m)
+# --- Modern renderer: desktop OpenGL 3.3 core, or OpenGL ES 3.0 ---
+# sdl3-glsl.c targets both APIs from one source (see the APP_USE_GLES switch in
+# the file). The desktop build loads GL via GLAD (generated under glad/); the
+# GLES build (Android, or desktop with -DSDL3GLSL_USE_GLES=ON against Mesa
+# GLES) links the GLES library directly and skips GLAD. obj_loader.h loads
+# OBJ/MTL/texture bundles and mat4.h does the matrix math; no GLU either way.
+option(SDL3GLSL_USE_GLES "Build sdl3-glsl against OpenGL ES 3.0 instead of desktop GL" OFF)
+if(SDL3GLSL_USE_GLES)
+    add_executable(sdl3-glsl sdl3-glsl.c)              # no GLAD on the ES path
+    target_include_directories(sdl3-glsl PRIVATE third_party)
+    target_compile_definitions(sdl3-glsl PRIVATE USE_GLES)
+    target_link_libraries(sdl3-glsl PRIVATE SDL3::SDL3 GLESv2 m)
+else()
+    add_executable(sdl3-glsl sdl3-glsl.c glad/src/gl.c)
+    target_include_directories(sdl3-glsl PRIVATE glad/include third_party)
+    target_link_libraries(sdl3-glsl PRIVATE SDL3::SDL3 OpenGL::GL m)
+endif()
 
 # No asset-copy step is needed: at runtime the program walks up from the
 # executable's directory (via SDL_GetBasePath()) to locate the assets/
