@@ -15,8 +15,25 @@
 // Build via CMake (target `sdl3-glsl`); see CMakeLists.txt. The legacy
 // `sdl3-gl` target is unaffected.
 
-#include <glad/gl.h>     /* must precede any other GL header */
+/* ------------------------------------------------------------------ *
+ * GL backend selection. The renderer targets two API flavours from one
+ * source: desktop OpenGL 3.3 core (entry points loaded via GLAD) and
+ * OpenGL ES 3.0 on mobile/web (Android, iOS, Emscripten), where the GLES
+ * functions are linked directly and no loader is used. GLES 3.0 implements
+ * the GL 3.3 feature subset this renderer relies on (VAOs, sized internal
+ * formats, depth textures, glGetStringi, GLSL #version 300 es); the handful
+ * of desktop-only calls (glPolygonMode, glDrawBuffer, CLAMP_TO_BORDER) are
+ * guarded on APP_USE_GLES below. Define USE_GLES to force the ES path.
+ * ------------------------------------------------------------------ */
+#if defined(__ANDROID__) || defined(SDL_PLATFORM_ANDROID) || defined(__EMSCRIPTEN__) || defined(USE_GLES)
+#  define APP_USE_GLES 1
+#  include <GLES3/gl3.h>  /* must precede any other GL header */
+#else
+#  define APP_USE_GLES 0
+#  include <glad/gl.h>    /* must precede any other GL header */
+#endif
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>   /* Android/iOS supply the entry point via SDL_main */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,9 +80,25 @@ static const char* asset_path(const char* relative)
 /* ------------------------------------------------------------------ *
  * Shaders. Attribute slots match obj_loader.h: 0 = normal, 1 = position,
  * 2 = texcoord (texcoord stays at its default when a model has none).
+ *
+ * The shader bodies below are written once, version-agnostic. compile_shader()
+ * prepends GLSL_PREAMBLE so the same source compiles as desktop GLSL 3.30 core
+ * or GLSL ES 3.00. ES has no default float/sampler precision in the fragment
+ * stage, so the preamble declares it (harmless in the vertex stage). Both use
+ * layout(location=), in/out, texture()/textureSize(), so no body edits needed.
  * ------------------------------------------------------------------ */
+#if APP_USE_GLES
+static const char* GLSL_PREAMBLE =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "precision highp int;\n"
+    "precision highp sampler2D;\n";
+#else
+static const char* GLSL_PREAMBLE =
+    "#version 330 core\n";
+#endif
+
 static const char* VERTEX_SRC =
-    "#version 330 core\n"
     "layout(location=0) in vec3 aNormal;\n"
     "layout(location=1) in vec3 aPosition;\n"
     "layout(location=2) in vec2 aTexCoord;\n"
@@ -89,18 +122,15 @@ static const char* VERTEX_SRC =
 /* Depth-only program: renders the scene from the light's viewpoint into the
    shadow map. Reuses attribute slot 1 (position); normals/uvs are ignored. */
 static const char* DEPTH_VERTEX_SRC =
-    "#version 330 core\n"
     "layout(location=1) in vec3 aPosition;\n"
     "uniform mat4 uLightSpace;\n"
     "uniform mat4 uModel;\n"
     "void main(){ gl_Position = uLightSpace * uModel * vec4(aPosition, 1.0); }\n";
 
 static const char* DEPTH_FRAGMENT_SRC =
-    "#version 330 core\n"
     "void main(){}\n";
 
 static const char* FRAGMENT_SRC =
-    "#version 330 core\n"
     "in vec3 vWorldPos;\n"
     "in vec3 vNormal;\n"
     "in vec2 vUV;\n"
@@ -134,7 +164,12 @@ static const char* FRAGMENT_SRC =
     "float shadow_factor(vec3 N, vec3 L){\n"
     "    vec3 p = vLightPos.xyz / vLightPos.w;\n"
     "    p = p * 0.5 + 0.5;\n"
-    "    if (p.z > 1.0) return 1.0;            // beyond the light's far plane\n"
+    "    // Outside the light frustum: treat as fully lit. Checking the bounds in\n"
+    "    // the shader makes the result independent of the depth texture's wrap\n"
+    "    // mode, so CLAMP_TO_EDGE (the GLES 3.0 fallback for CLAMP_TO_BORDER)\n"
+    "    // gives the same edge behaviour as a white depth border on desktop.\n"
+    "    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0)\n"
+    "        return 1.0;\n"
     "    float bias = max(0.0090 * (1.0 - dot(N, L)), 0.0020);\n"
     "    float cur = p.z - bias;\n"
     "    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));\n"
@@ -205,7 +240,9 @@ static const char* FRAGMENT_SRC =
 static GLuint compile_shader(GLenum type, const char* src)
 {
     GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, NULL);
+    /* Prepend the version/precision preamble so shader bodies stay portable. */
+    const char* srcs[2] = { GLSL_PREAMBLE, src };
+    glShaderSource(s, 2, srcs, NULL);
     glCompileShader(s);
     GLint ok = 0;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -482,19 +519,31 @@ static bool shadow_map_create(shadow_map* sm)
 {
     glGenTextures(1, &sm->tex);
     glBindTexture(GL_TEXTURE_2D, sm->tex);
+    /* Type must pair with the sized internal format: DEPTH_COMPONENT24 takes
+       GL_UNSIGNED_INT. Desktop GL ignores the type when data is NULL, but GLES
+       enforces the combo and would reject GL_FLOAT here (leaving the texture,
+       and thus the FBO, incomplete). GL_UNSIGNED_INT is correct on both. */
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_DIM, SHADOW_DIM,
-                 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+                 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+    /* CLAMP_TO_EDGE (not CLAMP_TO_BORDER, which is GLES 3.2+/extension only):
+       out-of-frustum samples are handled by the bounds check in shadow_factor(),
+       so the wrap mode no longer needs a white border to read as "lit". */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     glGenFramebuffers(1, &sm->fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, sm->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sm->tex, 0);
-    glDrawBuffer(GL_NONE);   /* depth only, no color attachment */
+    /* Depth-only: no color attachment. Desktop uses glDrawBuffer(GL_NONE); GLES
+       3.0 has only the plural glDrawBuffers. glReadBuffer(GL_NONE) is core in both. */
+#if APP_USE_GLES
+    const GLenum none = GL_NONE;
+    glDrawBuffers(1, &none);
+#else
+    glDrawBuffer(GL_NONE);
+#endif
     glReadBuffer(GL_NONE);
     bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -522,6 +571,18 @@ static mat4 orientation_matrix(int idx)
     return mat4_identity();
 }
 
+/* Toggle wireframe fill. glPolygonMode is desktop-GL only; GLES 3.0 has no
+   polygon fill mode, so on the ES path this is a no-op (wireframe unavailable)
+   and the 'W' key simply does nothing. */
+static void set_wireframe(bool on)
+{
+#if APP_USE_GLES
+    (void)on;
+#else
+    glPolygonMode(GL_FRONT_AND_BACK, on ? GL_LINE : GL_FILL);
+#endif
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc; (void)argv;
@@ -532,10 +593,18 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    /* Request an OpenGL 3.3 CORE context before creating the window. */
+    /* Request the GL context before creating the window: OpenGL ES 3.0 on
+       mobile/web, desktop OpenGL 3.3 CORE elsewhere. Both expose the feature
+       set this renderer uses. */
+#if APP_USE_GLES
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
@@ -551,12 +620,20 @@ int main(int argc, char* argv[])
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     if (!ctx) { fprintf(stderr, "GL context failed: %s\n", SDL_GetError()); return 1; }
 
+    /* Desktop loads entry points via GLAD; under GLES they are linked directly
+       (libGLESv3), so there is nothing to load. */
+#if !APP_USE_GLES
     int glver = gladLoadGL((GLADloadfunc)SDL_GL_GetProcAddress);
     if (glver == 0) { fprintf(stderr, "gladLoadGL failed\n"); return 1; }
     SDL_Log("OpenGL %d.%d  |  %s  |  %s",
             GLAD_VERSION_MAJOR(glver), GLAD_VERSION_MINOR(glver),
             (const char*)glGetString(GL_RENDERER),
             (const char*)glGetString(GL_VERSION));
+#else
+    SDL_Log("OpenGL ES  |  %s  |  %s",
+            (const char*)glGetString(GL_RENDERER),
+            (const char*)glGetString(GL_VERSION));
+#endif
 
     GLuint prog = link_program(VERTEX_SRC, FRAGMENT_SRC);
     if (!prog) return 1;
@@ -888,7 +965,7 @@ int main(int argc, char* argv[])
         glUniform1i(u.shadowMap, 1);
         glUniform1i(u.tex, 0);           /* material diffuse map on unit 0 */
 
-        glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
+        set_wireframe(wireframe);
         if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
         glBindVertexArray(g->vao);
 
@@ -949,7 +1026,7 @@ int main(int argc, char* argv[])
                                                 main scene's point source (in a
                                                 different space) can't dim it */
             glUniform3f(u.ambient, 0.55f, 0.55f, 0.55f);  /* brighter so it reads */
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            set_wireframe(false);           /* gizmo always solid */
             glDisable(GL_CULL_FACE);        /* thin glyphs: show both sides */
             glBindVertexArray(gizmo.vao);
             for (size_t i = 0; i < gizmo.mesh.submesh_count; i++)
