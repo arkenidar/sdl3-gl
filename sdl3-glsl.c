@@ -908,14 +908,50 @@ int main(int argc, char* argv[])
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
+    /* No-window-manager mode (Termux + Termux-X11, etc.). SDL's desktop
+       defaults assume a WM to (a) honor the EWMH maximize request and (b)
+       assign X keyboard input focus. With no WM the window may never show and
+       the on-screen keyboard's keys (e.g. ESC) go to no focused client. When we
+       detect that environment — TERMUX_VERSION is always set inside Termux — or
+       the user forces it with SDL3GL_NO_WM=1, we size the window to the display
+       ourselves, drop the WM-only MAXIMIZED flag, and (after creation)
+       force-raise + keyboard-grab so input focus lands on us. A normal desktop
+       under a real WM takes neither branch and behaves exactly as before. */
+    const bool no_wm = (SDL_getenv("SDL3GL_NO_WM")  != NULL) ||
+                       (SDL_getenv("TERMUX_VERSION") != NULL);
+
     /* Open maximized (full-size) but resizable; `width`/`height` are the
        restored-down size. The render loop reads the actual pixel size each
        frame, so it adapts to maximize/resize automatically. */
+    SDL_WindowFlags win_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+    if (no_wm) {
+        /* Borderless and sized to the display: there is no WM to maximize us,
+           so fill the screen ourselves. FORCE_RAISEWINDOW makes SDL focus the
+           window via XSetInputFocus instead of waiting for a WM to do it. */
+        SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+        win_flags |= SDL_WINDOW_BORDERLESS;
+        SDL_Rect bounds;
+        const SDL_DisplayID disp = SDL_GetPrimaryDisplay();
+        if (disp && SDL_GetDisplayBounds(disp, &bounds) && bounds.w > 0 && bounds.h > 0) {
+            width  = bounds.w;
+            height = bounds.h;
+        }
+    } else {
+        win_flags |= SDL_WINDOW_MAXIMIZED;
+    }
+
     SDL_Window* window = SDL_CreateWindow("sdl3-glsl (modern OpenGL)",
-                                          width, height,
-                                          SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
-                                          SDL_WINDOW_MAXIMIZED);
+                                          width, height, win_flags);
     if (!window) { fprintf(stderr, "CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+
+    if (no_wm) {
+        /* With no WM nobody positions, raises, or focuses us — do it ourselves
+           so the window is visible top-left and receives keyboard input. */
+        SDL_SetWindowPosition(window, 0, 0);
+        SDL_RaiseWindow(window);
+        SDL_SetWindowKeyboardGrab(window, true);
+        SDL_Log("no-WM mode: borderless %dx%d, forced focus + keyboard grab", width, height);
+    }
 
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     if (!ctx) { fprintf(stderr, "GL context failed: %s\n", SDL_GetError()); return 1; }

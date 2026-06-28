@@ -601,8 +601,44 @@ int main( int argc, char* argv[] )
     SDL_GL_SetAttribute( SDL_GL_DEPTH_SIZE, 16 );
     SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
 
+    /* No-window-manager mode (Termux + Termux-X11, etc.). SDL's desktop
+       defaults assume a WM to map the top-level window and assign X keyboard
+       input focus; with none the window may never show and the on-screen
+       keyboard's keys (e.g. ESC) reach no focused client. When we detect that
+       environment — TERMUX_VERSION is always set inside Termux — or the user
+       forces it with SDL3GL_NO_WM=1, we go borderless, size to the display,
+       and (after creation) force-raise + keyboard-grab so input lands on us.
+       A normal desktop under a real WM takes neither branch. */
+    const bool no_wm = ( SDL_getenv( "SDL3GL_NO_WM" )  != NULL ) ||
+                       ( SDL_getenv( "TERMUX_VERSION" ) != NULL );
+
+    SDL_WindowFlags win_flags = SDL_WINDOW_OPENGL;
+    if( no_wm ) {
+        SDL_SetHint( SDL_HINT_FORCE_RAISEWINDOW, "1" );
+        win_flags |= SDL_WINDOW_BORDERLESS;
+        SDL_Rect bounds;
+        const SDL_DisplayID disp = SDL_GetPrimaryDisplay( );
+        if( disp && SDL_GetDisplayBounds( disp, &bounds ) && bounds.w > 0 && bounds.h > 0 ) {
+            width  = bounds.w;
+            height = bounds.h;
+        }
+    }
+
     /* Create the window and its OpenGL context. */
-    window = SDL_CreateWindow("Game Engine", width, height, SDL_WINDOW_OPENGL);
+    window = SDL_CreateWindow("Game Engine", width, height, win_flags);
+    if( !window ) {
+        fprintf( stderr, "CreateWindow failed: %s\n", SDL_GetError( ) );
+        quit_tutorial( 1 );
+    }
+
+    if( no_wm ) {
+        /* No WM to position, raise, or focus us — do it ourselves. */
+        SDL_SetWindowPosition( window, 0, 0 );
+        SDL_RaiseWindow( window );
+        SDL_SetWindowKeyboardGrab( window, true );
+        SDL_Log( "no-WM mode: borderless %dx%d, forced focus + keyboard grab", width, height );
+    }
+
     SDL_GL_CreateContext(window);
 
     /*
