@@ -81,12 +81,16 @@ The assets are bundled at APK path `assets/<file>` (via the
 `app/src/main/assets/assets` symlink), matching the `"assets/..."` prefixes the
 code passes to the loader.
 
-**Verified on desktop** (GL and GLES configs load all models/textures). The
-on-device APK build is confirmed; running it on a physical device or emulator
-has not yet been exercised here (no device/AVD was attached). To check:
+**Verified on desktop** (GL and GLES configs load all models/textures) **and on
+a real Android device** — the APK installs, loads the models from the APK assets,
+and renders with GPU hardware acceleration. Install with:
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n org.sdl3gl/.MainActivity
 adb logcat -s SDL3GL SDL   # expect "model N: ..." and "texture loaded: ..." lines
 ```
+
+The hosted APK (rebuild, then `rsync` to the server) is at
+http://arkenidar.com/android/apk-files/sdl3-gl.apk — opening that URL on the
+phone installs it without a cable.

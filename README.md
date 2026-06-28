@@ -208,8 +208,8 @@ git submodule update --init --depth 1 SDL    # first time
 Asset loading is routed through `SDL_IOStream` (`SDL_LoadFile`/`SDL_IOFromFile`),
 so the same code reads the filesystem on desktop/Termux and the APK's
 `AAssetManager` on Android. The models are bundled at APK path `assets/<file>`
-and the loader resolves them there. Verified on the desktop GL/GLES builds;
-on-device run is documented but not yet exercised. Details in
+and the loader resolves them there. Verified on the desktop GL/GLES builds and
+on a real Android device (models load from the APK, GPU-accelerated). Details in
 [android/README.md](android/README.md#asset-loading).
 
 ## Assets
