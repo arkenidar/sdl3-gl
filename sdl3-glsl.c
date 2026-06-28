@@ -505,8 +505,10 @@ int main(int argc, char* argv[])
     gpu_model_load_textures(&gizmo);
     model_bounds(&gizmo.mesh, gcenter, &gradius);
 
-    /* Directional key light direction; must match the shader's key. The
-       light-space matrix that frames each model is rebuilt per frame below. */
+    /* Directional key light direction (surface->light), recomputed each frame
+       as a three-quarter key anchored to the camera (see below) so the side you
+       are looking at is always lit rather than turned away into shadow. The
+       light-space matrix that frames each model is rebuilt per frame too. */
     float keyDir[3] = { 0.6f, 0.8f, 0.5f };
     float Ld[3] = { keyDir[0], keyDir[1], keyDir[2] };
     vec3_normalize(Ld);
@@ -637,6 +639,27 @@ int main(int argc, char* argv[])
         float* center = mcenter[mi];
         float  radius = mradius[mi];
         const float DIST_MIN = radius * 0.2f, DIST_MAX = radius * 30.0f;
+
+        /* Three-quarter key light anchored to the camera: place it up and to the
+           right of the viewer so whatever faces the camera reads as lit. A fixed
+           world-space direction (the old behaviour) left the camera-facing side
+           turned away from the light and looking dark. Because this depends only
+           on yaw/pitch, the light orbits in lockstep with the camera during
+           auto-rotate, keeping the lit side toward the viewer and the
+           self-shadows stable in screen space (no sweep). */
+        {
+            /* camDir: model centre -> eye (toward the viewer) */
+            float camDir[3] = { cosf(pitch)*sinf(yaw), sinf(pitch), cosf(pitch)*cosf(yaw) };
+            float worldUp[3] = { 0.0f, 1.0f, 0.0f };
+            float right[3], up[3];
+            vec3_cross(worldUp, camDir, right); vec3_normalize(right);
+            vec3_cross(camDir, right, up);      vec3_normalize(up);
+            keyDir[0] = camDir[0] + 0.40f*right[0] + 0.55f*up[0];
+            keyDir[1] = camDir[1] + 0.40f*right[1] + 0.55f*up[1];
+            keyDir[2] = camDir[2] + 0.40f*right[2] + 0.55f*up[2];
+            vec3_normalize(keyDir);
+            Ld[0] = keyDir[0]; Ld[1] = keyDir[1]; Ld[2] = keyDir[2];
+        }
 
         /* light-space matrix framing THIS model's bounding sphere; rebuilt
            each frame so cycling models reframes the shadow correctly. */
