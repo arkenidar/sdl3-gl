@@ -42,14 +42,17 @@ sudo apt install build-essential cmake libsdl3-dev libgl1-mesa-dev libglu1-mesa-
 ## Build & run
 
 ```sh
-cmake -S . -B build
+cmake -S . -B build -DSDL3GLSL_USE_GLES=OFF   # desktop GL 3.3; ON for OpenGL ES 3.0
 cmake --build build
 ./build/sdl3-gl        # legacy fixed-function renderer
 ./build/sdl3-glsl      # modern core-profile 3.3 + GLSL renderer
 ```
 
-Both executables build by default and run independently. Either can be launched
-from any directory — they locate the `assets/` folder on their own (see below).
+`SDL3GLSL_USE_GLES` has no default and **must** be set at configure time —
+`=OFF` for the desktop GL 3.3 backend, `=ON` for OpenGL ES 3.0 (see
+[OpenGL ES 3.0 / mobile portability](#opengl-es-30--mobile-portability)). Both
+executables build and run independently, and either can be launched from any
+directory — they locate the `assets/` folder on their own (see below).
 
 ## Controls
 
@@ -163,6 +166,30 @@ cmake -S . -B build-gles -DSDL3GLSL_USE_GLES=ON   # links GLESv2, defines USE_GL
 cmake --build build-gles
 ./build-gles/sdl3-glsl
 ```
+
+#### On a real device via Termux (no APK, no code changes)
+
+[Termux](https://termux.dev/) is a Linux userland on Android, so the GLES build
+runs there **unmodified** — assets live on the real filesystem, so the
+`fopen`-based `asset_path()` works as-is. You only need a display server and a
+GLES-capable Mesa. Install [Termux:X11](https://github.com/termux/termux-x11),
+then in Termux:
+
+```sh
+pkg install x11-repo
+pkg install termux-x11-nightly mesa mesa-dev sdl3 cmake clang   # verify: pkg search sdl3
+# launch the Termux:X11 app, then back in Termux:
+export DISPLAY=:0
+cmake -S . -B build-gles -DSDL3GLSL_USE_GLES=ON
+cmake --build build-gles
+./build-gles/sdl3-glsl
+```
+
+Notes: if `sdl3` isn't packaged for your Termux, build SDL3 from source. GLES is
+served through the host GPU via **virgl** or **zink-over-Vulkan** (Turnip on
+Adreno, Panfrost on Mali), so performance depends on the device and driver.
+
+#### Packaged APK
 
 **Android** is not yet packaged. The renderer/shaders are ES-ready, but an APK
 still needs: an Android Studio/Gradle + NDK project wrapping SDL3 (with
