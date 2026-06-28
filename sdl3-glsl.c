@@ -580,11 +580,18 @@ int main(int argc, char* argv[])
         "assets/head.obj",
         "assets/cube.obj",
     };
+    /* Per-model default orientation preset (index into orientation_matrix).
+       The converter-exported assets are Z-up so they need the Z-up->Y-up
+       correction (1); head.obj and cube.obj are already Y-up, so identity (0).
+       'O' edits the current model's preset live; each model keeps its own. */
+    const int model_orient_default[] = { 1, 1, 0, 0 };
     const int NUM_MODELS = (int)(sizeof model_paths / sizeof model_paths[0]);
     gpu_model models[8];
     float mcenter[8][3];
     float mradius[8];
+    int   orient_index[8];             /* per-model orientation preset */
     for (int i = 0; i < NUM_MODELS; i++) {
+        orient_index[i] = model_orient_default[i];
         memset(&models[i], 0, sizeof models[i]);
         if (!obj_load(asset_path(model_paths[i]), &models[i].mesh)) {
             fprintf(stderr, "failed to load %s\n", model_paths[i]);
@@ -629,7 +636,6 @@ int main(int argc, char* argv[])
                                           yaw), so the model holds still under a
                                           camera-anchored light and self-shadows
                                           stay put instead of sweeping */
-    int   orient_index = 1;            /* default Z-up -> Y-up correction */
 
     glEnable(GL_DEPTH_TEST);
     glCullFace(GL_BACK);
@@ -683,8 +689,9 @@ int main(int argc, char* argv[])
                 case SDLK_LEFTBRACKET:  ambient = fmaxf(0.0f, ambient - 0.05f);
                     SDL_Log("ambient: %.2f", ambient); break;
                 case SDLK_O:
-                    orient_index = (orient_index + 1) % ORIENT_COUNT;
-                    SDL_Log("orientation preset %d/%d", orient_index, ORIENT_COUNT - 1);
+                    orient_index[mi] = (orient_index[mi] + 1) % ORIENT_COUNT;
+                    SDL_Log("model %d orientation preset %d/%d", mi,
+                            orient_index[mi], ORIENT_COUNT - 1);
                     break;
                 default: break;
                 }
@@ -814,7 +821,7 @@ int main(int argc, char* argv[])
            geometry itself never spins. Shared by both passes, so the depth pass
            rebuilds the shadow map for the same static pose. */
         mat4 model = mat4_mul(mat4_translate(center[0], center[1], center[2]),
-                     mat4_mul(orientation_matrix(orient_index),
+                     mat4_mul(orientation_matrix(orient_index[mi]),
                               mat4_translate(-center[0], -center[1], -center[2])));
         float normalMat[9];
         mat3_normal_from_mat4(model, normalMat);
@@ -927,7 +934,7 @@ int main(int argc, char* argv[])
                centre. The model no longer spins, so the labels track the pose
                purely through the shared yaw/pitch of geye. */
             mat4 gmodel = mat4_mul(mat4_translate(gcenter[0], gcenter[1], gcenter[2]),
-                          mat4_mul(orientation_matrix(orient_index),
+                          mat4_mul(orientation_matrix(orient_index[mi]),
                                    mat4_translate(-gcenter[0], -gcenter[1], -gcenter[2])));
             mat4 gmvp   = mat4_mul(gproj, mat4_mul(gview, gmodel));
             float gnormal[9];
